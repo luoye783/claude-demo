@@ -10,5 +10,8 @@ target/
 # 忽略claude文件
 .claude/
 
+# Claude 自动提交标记文件(Stop 钩子运行时写入,提交后即删)
+.claude/commit-pending
+
 #忽略macos文件
 .DS_Store

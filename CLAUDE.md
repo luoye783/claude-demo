@@ -237,6 +237,30 @@ claude-demo
 - 学习示例存放在 `agent/` 包下，每个示例附 README
 - Agent 与传统 Service 的边界：Agent 处理"非确定性决策"，Service 处理"确定性业务"
 
+### 10.4 Git 自动提交
+
+Claude 完成一个**完整任务**后,会写入 `<项目根>/.claude/commit-pending` 标记文件,
+Stop 钩子会执行:`mvn test` → 通过则 `git add .` + `git commit -F <标记>` → 删除标记。
+
+**触发条件(必须同时满足)**:
+1. 任务逻辑完整,非中途探索 / 讨论 / 规划
+2. 测试已通过(Claude 自行跑过 `mvn test` 或由用户确认)
+3. commit message 已按 §九 Conventional Commits 写好,多行消息直接写入标记文件即可
+
+**不触发的场景**:
+- 普通提问、阅读代码、规划讨论
+- 任务中途被打断或未验证
+- 用户明确说"先别提交"或"不要提交"
+- 仅修改文档 / 注释(无功能变更)
+
+**绝不 push**:钩子只 `commit`,`push` 永远由用户手动决定,脚本中无 `git push`。
+
+**钩子位置**(用户级,跨项目复用):
+- 脚本:`~/.claude/hooks/auto-commit.sh`
+- 配置:`~/.claude/settings.json` 的 `hooks.Stop`
+
+**标记文件**: `.claude/commit-pending`(已在 `.gitignore` 中显式忽略)
+
 ---
 
 ## 十一、常用命令
