@@ -142,6 +142,13 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- MySQL 驱动：dev profile 连接本地 MySQL -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
         <!--
           MCP Java SDK:暴露 get_schema / execute_sql 给 Claude Code
           详见 com.example.claudedemo.mcp 包

@@ -20,10 +20,9 @@ import org.springframework.context.annotation.Import;
  * <p>本类用最朴素的 {@code @Configuration} + {@code @ComponentScan},不参与 Spring Boot 自动配置,
  * 不被 Spring Boot Test 当作候选主类,对其它上下文零影响.
  *
- * <p><b>Step 2 范围内</b>:引入 {@link McpDataSourceConfig}(H2 嵌入式数据源)
- * 与 {@link SchemaIntrospector} / {@link SchemaSelector},使 get_schema tool 可工作.
- * 不扫描 {@code com.example.claudedemo.agent} / {@code com.example.claudedemo.sql} 全包,
- * 而是精准 {@code @Import} 需要的 bean,避免拉入不相关的组件(如 LlmClient 等).
+ * <p>数据源由 {@link McpDataSourceConfig} 手动提供 MySQL 连接,
+ * 不依赖 Spring Boot 自动配置(详见该类的 Javadoc).
+ * 通过 {@code @Import} 精准引入所需 bean,避免拉入不相关的组件(如 LlmClient 等).
  *
  * @author claude-code
  * @since 0.0.1
