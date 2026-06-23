@@ -22,8 +22,12 @@ import java.util.List;
  *   <li>{@link #describeTable(String)} 描述单表字段信息</li>
  * </ul>
  *
- * <p><b>重要</b>：通过 {@code conn.getSchema()} 限定到当前 schema，
- * 避免 H2 / MySQL 的 INFORMATION_SCHEMA 系统表污染结果。
+ * <p><b>跨数据库兼容</b>：
+ * <ul>
+ *   <li>H2：{@code conn.getSchema()} 返回 {@code "PUBLIC"}，用 schema 参数过滤</li>
+ *   <li>MySQL：{@code conn.getSchema()} 返回 {@code null}，改用
+ *       {@code conn.getCatalog()}（当前数据库名）作为 catalog 参数过滤</li>
+ * </ul>
  *
  * @author claude-code
  * @since 0.0.1
@@ -33,9 +37,6 @@ public class SchemaIntrospector {
 
     /** 只查询普通表（不含 VIEW / SYSTEM TABLE 等）. */
     private static final String[] TABLE_TYPES = {"TABLE"};
-
-    /** H2 默认 schema. */
-    private static final String DEFAULT_SCHEMA = "PUBLIC";
 
     private final DataSource dataSource;
 
@@ -50,8 +51,17 @@ public class SchemaIntrospector {
      */
     public List<String> listTables() {
         try (Connection conn = dataSource.getConnection()) {
-            String schema = resolveSchema(conn);
-            try (ResultSet rs = conn.getMetaData().getTables(null, schema, "%", TABLE_TYPES)) {
+            String schema = conn.getSchema();
+            String catalog;
+            if (schema != null && !schema.isBlank()) {
+                // H2: getSchema() 返回 "PUBLIC"，用 schema 过滤，catalog 传 null
+                catalog = null;
+            } else {
+                // MySQL: getSchema() 返回 null，用 getCatalog()（数据库名）过滤
+                catalog = conn.getCatalog();
+                schema = null;
+            }
+            try (ResultSet rs = conn.getMetaData().getTables(catalog, schema, "%", TABLE_TYPES)) {
                 List<String> tables = new ArrayList<>();
                 while (rs.next()) {
                     tables.add(rs.getString("TABLE_NAME"));
@@ -75,8 +85,15 @@ public class SchemaIntrospector {
             throw new IllegalArgumentException("tableName must not be null or empty");
         }
         try (Connection conn = dataSource.getConnection()) {
-            String schema = resolveSchema(conn);
-            try (ResultSet rs = conn.getMetaData().getColumns(null, schema, tableName, "%")) {
+            String schema = conn.getSchema();
+            String catalog;
+            if (schema != null && !schema.isBlank()) {
+                catalog = null;
+            } else {
+                catalog = conn.getCatalog();
+                schema = null;
+            }
+            try (ResultSet rs = conn.getMetaData().getColumns(catalog, schema, tableName, "%")) {
                 List<ColumnInfo> columns = new ArrayList<>();
                 while (rs.next()) {
                     columns.add(new ColumnInfo(
@@ -93,13 +110,4 @@ public class SchemaIntrospector {
         }
     }
 
-    /**
-     * 解析当前连接的有效 schema.
-     *
-     * <p>优先用 {@code conn.getSchema()}；若返回 null（H2 极端场景）则回退到 PUBLIC。
-     */
-    private String resolveSchema(Connection conn) throws SQLException {
-        String schema = conn.getSchema();
-        return (schema != null && !schema.isBlank()) ? schema : DEFAULT_SCHEMA;
-    }
 }

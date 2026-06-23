@@ -1,6 +1,12 @@
 package com.example.claudedemo.mcp.server;
 
 import com.example.claudedemo.agent.SchemaSelector;
+import com.example.claudedemo.sql.SqlErrorCode;
+import com.example.claudedemo.sql.SqlExecutor;
+import com.example.claudedemo.sql.SqlValidationException;
+import com.example.claudedemo.sql.SqlValidator;
+import com.example.claudedemo.sql.ValidatedSql;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.modelcontextprotocol.json.McpJsonMapper;
 import io.modelcontextprotocol.server.McpServer;
 import io.modelcontextprotocol.server.McpServerFeatures;
@@ -16,18 +22,15 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * MCP Server 工厂:V1 构建空 server;Step 2 注册 get_schema tool.
+ * MCP Server 工厂:Step 2 注册 get_schema, Step 3 注册 execute_sql.
  *
  * <p><b>职责</b>:
  * <ul>
  *   <li>构造 {@link McpJsonMapper}(复用 Spring Boot 自带的 Jackson 2,见 {@link Jackson2McpJsonMapper})</li>
  *   <li>构造 {@link StdioServerTransportProvider}(绑定 {@code System.in} / {@code System.out})</li>
  *   <li>用 {@link McpServer#sync} 构造 {@link McpSyncServer}</li>
- *   <li>注册 get_schema tool(Step 2),后续 Step 3 加入 execute_sql</li>
+ *   <li>注册 get_schema tool(Step 2) 与 execute_sql tool(Step 3)</li>
  * </ul>
- *
- * <p><b>Step 2 状态</b>:注册 get_schema tool,复用 {@link SchemaSelector}.
- * 当 schemaSelector 为 null(未配置数据源)时,工具调用返回错误信息.
  *
  * <p><b>不变量</b>:
  * <ul>
@@ -43,12 +46,20 @@ public class McpServerFactory {
 
     private static final Logger log = LoggerFactory.getLogger(McpServerFactory.class);
 
-    /** 为空时表数据库未配置(大部分测试场景无需数据库). */
-    private final SchemaSelector schemaSelector;
+    private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
 
-    @Autowired(required = false)
-    public McpServerFactory(SchemaSelector schemaSelector) {
+    private final SchemaSelector schemaSelector;
+    private final SqlValidator sqlValidator;
+    private final SqlExecutor sqlExecutor;
+
+    @Autowired
+    public McpServerFactory(
+            @Autowired(required = false) SchemaSelector schemaSelector,
+            @Autowired(required = false) SqlValidator sqlValidator,
+            @Autowired(required = false) SqlExecutor sqlExecutor) {
         this.schemaSelector = schemaSelector;
+        this.sqlValidator = sqlValidator;
+        this.sqlExecutor = sqlExecutor;
     }
 
     /**
@@ -85,6 +96,81 @@ public class McpServerFactory {
     }
 
     /**
+     * 构造 execute_sql 的 MCP Tool 规格.
+     *
+     * <p>入参:
+     * <ul>
+     *   <li>{@code sql} — SQL 查询语句(仅 SELECT,必填)</li>
+     * </ul>
+     *
+     * <p>返回 JSON:
+     * <ul>
+     *   <li>{@code sql} — 实际执行的 SQL</li>
+     *   <li>{@code rowCount} — 返回行数</li>
+     *   <li>{@code rows} — 数据行列表</li>
+     * </ul>
+     *
+     * @return execute_sql 工具规格
+     */
+    McpServerFeatures.SyncToolSpecification buildExecuteSqlTool() {
+        McpSchema.Tool tool = McpSchema.Tool.builder()
+                .name("execute_sql")
+                .description("执行 SQL 查询（仅支持 SELECT 语句），返回 JSON 格式的结果。"
+                        + "DELETE / UPDATE / INSERT 等 DML 操作将被拒绝。")
+                .inputSchema(new McpSchema.JsonSchema(
+                        "object",
+                        Map.of("sql", Map.of(
+                                "type", "string",
+                                "description", "SQL 查询语句（仅 SELECT）")),
+                        List.of("sql"),
+                        false, null, null))
+                .build();
+
+        return new McpServerFeatures.SyncToolSpecification(
+                tool,
+                (exchange, request) -> {
+                    // 1. 校验 sql 参数
+                    Object sqlObj = request.arguments().get("sql");
+                    if (sqlObj == null || !(sqlObj instanceof String sql) || sql.trim().isEmpty()) {
+                        return errorResult("缺少必填参数 sql");
+                    }
+
+                    // 2. 校验 SQL（SqlValidator 拒绝非 SELECT）
+                    ValidatedSql validated;
+                    try {
+                        validated = sqlValidator.validate(sql);
+                    } catch (SqlValidationException e) {
+                        return errorResult(e.getMessage());
+                    }
+
+                    // 3. 执行 SQL
+                    List<Map<String, Object>> rows;
+                    try {
+                        rows = sqlExecutor.execute(validated);
+                    } catch (Exception e) {
+                        log.warn("SQL 执行失败: sql={}, error={}", validated.sql(), e.toString());
+                        return errorResult("SQL 执行失败: " + e.getMessage());
+                    }
+
+                    // 4. 格式化为 JSON 返回
+                    try {
+                        String json = JSON_MAPPER.writeValueAsString(Map.of(
+                                "sql", validated.sql(),
+                                "rowCount", rows.size(),
+                                "rows", rows
+                        ));
+                        return new McpSchema.CallToolResult(
+                                List.of(new McpSchema.TextContent(json)),
+                                false, null, null);
+                    } catch (Exception e) {
+                        log.warn("JSON 序列化失败", e);
+                        return errorResult("结果格式化失败");
+                    }
+                }
+        );
+    }
+
+    /**
      * 构造并启动 MCP server.
      *
      * <p>server 启动后会在后台线程读取 stdin,持续到 EOF 或被 close.
@@ -101,16 +187,17 @@ public class McpServerFactory {
         StdioServerTransportProvider transport = new StdioServerTransportProvider(jsonMapper);
         log.info("StdioServerTransportProvider initialized (stdin/stdout bound)");
 
-        // 3. 构造 server:注册 get_schema tool
+        // 3. 构造 server:注册 get_schema + execute_sql tool
         McpSchema.ServerCapabilities capabilities = McpSchema.ServerCapabilities.builder()
                 .tools(true)
                 .build();
 
         McpServerFeatures.SyncToolSpecification getSchemaSpec = buildGetSchemaTool();
+        McpServerFeatures.SyncToolSpecification executeSqlSpec = buildExecuteSqlTool();
         McpSyncServer server = McpServer.sync(transport)
                 .serverInfo(McpServerMetadata.SERVER_NAME, McpServerMetadata.SERVER_VERSION)
                 .capabilities(capabilities)
-                .tools(getSchemaSpec)
+                .tools(getSchemaSpec, executeSqlSpec)
                 .build();
 
         log.info("MCP server started: name={}, version={}, toolCount={}",
@@ -122,5 +209,14 @@ public class McpServerFactory {
         log.info("MCP server is now listening on stdin. Send JSON-RPC frames to interact.");
 
         return server;
+    }
+
+    /**
+     * 构造错误返回结果.
+     */
+    private static McpSchema.CallToolResult errorResult(String message) {
+        return new McpSchema.CallToolResult(
+                List.of(new McpSchema.TextContent("Error: " + message)),
+                true, null, null);
     }
 }

@@ -30,6 +30,8 @@ import org.springframework.context.annotation.Import;
  */
 @Configuration
 @ComponentScan(basePackages = "com.example.claudedemo.mcp")
-@Import({McpDataSourceConfig.class, SchemaIntrospector.class, SchemaSelector.class})
+@Import({McpDataSourceConfig.class, SchemaIntrospector.class, SchemaSelector.class,
+        com.example.claudedemo.sql.SqlValidator.class,
+        com.example.claudedemo.sql.SqlExecutor.class})
 public class McpServerConfig {
 }
