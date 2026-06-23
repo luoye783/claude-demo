@@ -7,7 +7,7 @@
         "exec:java",
         "-Dexec.mainClass=com.example.claudedemo.mcp.McpServerMain",
         "-Dspring.main.web-application-type=none",
-        "-Dlogback.configurationFile=logbac k-mcp.xml"
+        "-Dlogback.configurationFile=logback-mcp.xml"
       ]
     }
   }
