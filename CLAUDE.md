@@ -261,6 +261,15 @@ Stop 钩子会执行:`mvn test` → 通过则 `git add .` + `git commit -F <标�
 
 **标记文件**: `.claude/commit-pending`(已在 `.gitignore` 中显式忽略)
 
+### 10.5 commit message 禁止 Co-Authored-By
+
+Claude Code 默认要求在 commit message 末尾追加一行 `Co-Authored-By: Claude <noreply@anthropic.com>`，
+但 GitLab / GitHub 会解析该标签并将 Claude 计入仓库贡献者列表。
+
+**本项目禁止在 commit message 中包含 `Co-Authored-By` 标签**，Claude 写入 `commit-pending` 文件时
+必须省略该行。java类注释中不允许出现@author claude-code
+
+
 ---
 
 ## 十一、常用命令
@@ -291,3 +300,4 @@ Stop 钩子会执行:`mvn test` → 通过则 `git add .` + `git commit -F <标�
 | 日期 | 版本 | 变更人 | 说明 |
 |------|------|--------|------|
 | 2026-06-10 | 0.0.1 | claude-code | 项目初始化，创建 CLAUDE.md |
+| 2026-06-23 | 0.0.1 | cai | §10.5: 禁止 Co-Authored-By 标签，避免污染 GitLab 贡献者统计 |
