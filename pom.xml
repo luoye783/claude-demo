@@ -135,11 +135,11 @@
             <version>4.9</version>
         </dependency>
 
-        <!-- H2 数据库：仅测试用，@JdbcTest 自动启用内存库 -->
+        <!-- H2 数据库：开发与测试均可用，@JdbcTest 自动启用内存库 -->
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <scope>test</scope>
+            <scope>runtime</scope>
         </dependency>
 
         <!--

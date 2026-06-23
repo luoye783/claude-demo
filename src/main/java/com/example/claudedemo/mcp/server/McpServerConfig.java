@@ -1,7 +1,10 @@
 package com.example.claudedemo.mcp.server;
 
+import com.example.claudedemo.agent.SchemaSelector;
+import com.example.claudedemo.sql.SchemaIntrospector;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Import;
 
 /**
  * MCP Server 专用 Spring 配置.
@@ -17,13 +20,16 @@ import org.springframework.context.annotation.Configuration;
  * <p>本类用最朴素的 {@code @Configuration} + {@code @ComponentScan},不参与 Spring Boot 自动配置,
  * 不被 Spring Boot Test 当作候选主类,对其它上下文零影响.
  *
- * <p><b>Step 1 范围内</b>:不引入任何 Spring Boot 自动配置(不需要 DataSource / Web);
- * Step 3 引入 {@code execute_sql} tool 时,会单独增加 DataSource 配置类,继续保持本类的最小化.
+ * <p><b>Step 2 范围内</b>:引入 {@link McpDataSourceConfig}(H2 嵌入式数据源)
+ * 与 {@link SchemaIntrospector} / {@link SchemaSelector},使 get_schema tool 可工作.
+ * 不扫描 {@code com.example.claudedemo.agent} / {@code com.example.claudedemo.sql} 全包,
+ * 而是精准 {@code @Import} 需要的 bean,避免拉入不相关的组件(如 LlmClient 等).
  *
  * @author claude-code
  * @since 0.0.1
  */
 @Configuration
 @ComponentScan(basePackages = "com.example.claudedemo.mcp")
+@Import({McpDataSourceConfig.class, SchemaIntrospector.class, SchemaSelector.class})
 public class McpServerConfig {
 }
