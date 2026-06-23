@@ -1,6 +1,5 @@
 package com.example.claudedemo.agent.mcp;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,7 +37,7 @@ class StdioMcpToolClientManualIT {
         try (StdioMcpToolClient client = new StdioMcpToolClient(
                 mcpClientProperties.command(), mcpClientProperties.args())) {
 
-            List<String> tools = client.listTools();
+            List<String> tools = client.listToolNames();
 
             System.out.println("=== listTools ===");
             tools.forEach(t -> System.out.println("  - " + t));
@@ -50,13 +49,13 @@ class StdioMcpToolClientManualIT {
     }
 
     @Test
-    void getSchema_should_return_schema_text() throws Exception {
+    void callTool_getSchema_should_return_schema_text() throws Exception {
         try (StdioMcpToolClient client = new StdioMcpToolClient(
                 mcpClientProperties.command(), mcpClientProperties.args())) {
 
-            String schema = client.getSchema();
+            String schema = client.callTool("get_schema", "{}");
 
-            System.out.println("=== getSchema ===");
+            System.out.println("=== callTool get_schema ===");
             System.out.println(schema);
 
             assertFalse(schema.isEmpty(), "schema 不应为空");
@@ -65,13 +64,13 @@ class StdioMcpToolClientManualIT {
     }
 
     @Test
-    void executeSql_select_should_return_json() throws Exception {
+    void callTool_executeSql_select_should_return_json() throws Exception {
         try (StdioMcpToolClient client = new StdioMcpToolClient(
                 mcpClientProperties.command(), mcpClientProperties.args())) {
 
-            String result = client.executeSql("SELECT 1");
+            String result = client.callTool("execute_sql", "{\"sql\":\"SELECT 1\"}");
 
-            System.out.println("=== executeSql SELECT 1 ===");
+            System.out.println("=== callTool execute_sql SELECT 1 ===");
             System.out.println(result);
 
             assertFalse(result.startsWith("Error:"), "不应返回错误,实际: " + result);
@@ -81,13 +80,13 @@ class StdioMcpToolClientManualIT {
     }
 
     @Test
-    void executeSql_delete_should_be_rejected() throws Exception {
+    void callTool_executeSql_delete_should_be_rejected() throws Exception {
         try (StdioMcpToolClient client = new StdioMcpToolClient(
                 mcpClientProperties.command(), mcpClientProperties.args())) {
 
-            String result = client.executeSql("DELETE FROM users");
+            String result = client.callTool("execute_sql", "{\"sql\":\"DELETE FROM users\"}");
 
-            System.out.println("=== executeSql DELETE (expected error) ===");
+            System.out.println("=== callTool execute_sql DELETE (expected error) ===");
             System.out.println(result);
 
             assertTrue(result.startsWith("Error:"), "DELETE 应返回错误,实际: " + result);

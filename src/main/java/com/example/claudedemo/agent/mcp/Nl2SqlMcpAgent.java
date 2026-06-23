@@ -8,14 +8,11 @@ import com.example.claudedemo.llm.LlmClient;
 import com.example.claudedemo.llm.LlmResponse;
 import com.example.claudedemo.llm.ToolCall;
 import com.example.claudedemo.llm.ToolDefinition;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * NL2SQL MCP Agent V1 — 通过 {@link McpToolClient} 调用 MCP Server 工具.
@@ -27,8 +24,8 @@ import java.util.Map;
  *
  * <p><b>与 Nl2SqlToolAgent 的关键差异</b>：
  * <ul>
- *   <li>工具定义硬编码(而非从 AgentTool 获取)</li>
- *   <li>工具执行委托给 {@link McpToolClient}(而非本地 AgentTool 实现)</li>
+ *   <li>工具定义通过 {@link McpToolClient#listToolDefinitions()} 动态获取,而非硬编码或本地 AgentTool</li>
+ *   <li>工具执行通过 {@link McpToolClient#callTool(String, String)} 通用转发,无 switch/case 枚举</li>
  *   <li>不依赖 Spring 注解{@code @Component}(由调用方自己实例化)</li>
  * </ul>
  *
@@ -50,9 +47,6 @@ public class Nl2SqlMcpAgent {
     /** 最大循环轮数(每轮 = 1 次 LLM 调用). */
     public static final int MAX_ROUNDS = 5;
 
-    /** JSON 解析器(用于从 execute_sql 参数中提取 sql). */
-    private static final ObjectMapper MAPPER = new ObjectMapper();
-
     private static final String SYSTEM_PROMPT = """
             你是 NL2SQL 助手。你可以使用工具查询数据库,然后用中文回答用户的问题。
             工具使用规则:
@@ -62,38 +56,10 @@ public class Nl2SqlMcpAgent {
             4. 当工具返回 Error 字符串时,必须修改 SQL 或策略后再次调用,直到成功或信息充分
             """;
 
-    /** 硬编码的工具定义,与 MCP Server 注册的工具保持一致. */
-    private static final List<ToolDefinition> TOOL_DEFS = List.of(
-            new ToolDefinition(
-                    "get_schema",
-                    "获取数据库中所有表的结构(表名 + 字段名 + 字段类型 + 是否非空 + 字段注释)。"
-                            + "必须作为首个工具调用,以便了解有哪些表可用。",
-                    Map.of(
-                            "type", "object",
-                            "properties", Map.of(),
-                            "required", List.of()
-                    )
-            ),
-            new ToolDefinition(
-                    "execute_sql",
-                    "执行只读 SELECT SQL(自动注入 LIMIT 上限 100)。"
-                            + "返回 JSON 格式的行数据与列信息。",
-                    Map.of(
-                            "type", "object",
-                            "properties", Map.of(
-                                    "sql", Map.of(
-                                            "type", "string",
-                                            "description", "要执行的 SQL 语句,必须为 SELECT,"
-                                                    + "不能为 INSERT/UPDATE/DELETE/DROP"
-                                    )
-                            ),
-                            "required", List.of("sql")
-                    )
-            )
-    );
-
     private final LlmClient llmClient;
     private final McpToolClient mcpToolClient;
+    /** 工具定义缓存(首次调用时从 McpToolClient 获取,后续复用). */
+    private List<ToolDefinition> toolDefs;
 
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient) {
         this.llmClient = llmClient;
@@ -108,6 +74,9 @@ public class Nl2SqlMcpAgent {
      * @throws ToolCallingExhaustedException 当超过 {@value #MAX_ROUNDS} 轮 LLM 仍未给出最终答案
      */
     public ToolCallingResult answer(String question) {
+        // 0. 获取工具定义(首次调用时从 McpToolClient 获取)
+        List<ToolDefinition> resolvedToolDefs = resolveToolDefs();
+
         // 1. 初始化消息列表
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", SYSTEM_PROMPT));
@@ -117,7 +86,7 @@ public class Nl2SqlMcpAgent {
 
         // 2. 循环
         for (int round = 1; round <= MAX_ROUNDS; round++) {
-            LlmResponse resp = llmClient.chatWithTools(messages, TOOL_DEFS);
+            LlmResponse resp = llmClient.chatWithTools(messages, resolvedToolDefs);
 
             // 2.1 无条件回填 assistant 消息
             messages.add(new ChatMessage(
@@ -158,46 +127,27 @@ public class Nl2SqlMcpAgent {
     }
 
     /**
-     * 通过 {@link McpToolClient} 执行工具调用.
+     * 通过 {@link McpToolClient} 通用调用.
      *
-     * <p>三层防御:
-     * <ul>
-     *   <li>工具名不存在 → 返回 {@code Error: unknown tool} 字符串</li>
-     *   <li>参数解析失败 → 返回 {@code Error: ...}</li>
-     *   <li>McpToolClient 实现应自行吞掉异常、以 Error 字符串返回</li>
-     * </ul>
+     * <p>不做任何工具名/参数的枚举或校验,完全交由 McpToolClient 处理.
      */
     private String executeTool(ToolCall call) {
         if (call == null || call.function() == null) {
             return "Error: [MalformedCall] tool call is malformed";
         }
-        String name = call.function().name();
         String args = call.function().arguments();
-
-        return switch (name) {
-            case "get_schema" -> mcpToolClient.getSchema();
-            case "execute_sql" -> executeSql(args);
-            default -> "Error: [UnknownTool] unknown tool '" + name + "'";
-        };
+        return mcpToolClient.callTool(call.function().name(), args == null ? "{}" : args);
     }
 
     /**
-     * 从 LLM 参数 JSON 中提取 sql 并委托 McpToolClient 执行.
+     * 获取工具定义.
+     *
+     * <p>首次调用时向 McpToolClient 查询并缓存,后续复用.
      */
-    private String executeSql(String argumentsJson) {
-        String sql;
-        try {
-            Map<String, Object> args = MAPPER.readValue(
-                    argumentsJson == null ? "{}" : argumentsJson,
-                    new TypeReference<Map<String, Object>>() {});
-            Object sqlObj = args.get("sql");
-            if (sqlObj == null) {
-                return "Error: [MissingArgument] missing required argument 'sql'";
-            }
-            sql = sqlObj.toString();
-        } catch (Exception e) {
-            return "Error: [InvalidArguments] failed to parse arguments JSON: " + e.getMessage();
+    private List<ToolDefinition> resolveToolDefs() {
+        if (toolDefs == null) {
+            toolDefs = mcpToolClient.listToolDefinitions();
         }
-        return mcpToolClient.executeSql(sql);
+        return toolDefs;
     }
 }

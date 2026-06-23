@@ -1,10 +1,15 @@
 package com.example.claudedemo.agent.mcp;
 
+import com.example.claudedemo.llm.ToolDefinition;
+
+import java.util.List;
+
 /**
- * MCP 工具客户端接口(阶段 A:适配层).
+ * MCP 工具客户端接口.
  *
- * <p>抽象 MCP Server 的 get_schema / execute_sql 工具调用,
- * 使 {@link Nl2SqlMcpAgent} 不依赖具体实现(Mock / STDIO / 其他传输).
+ * <p>抽象 MCP Server 的工具调用,使 {@link Nl2SqlMcpAgent} 不依赖具体实现(Mock / STDIO / 其他传输).
+ * Agent 通过 {@link #listToolDefinitions()} 获取工具列表、通过 {@link #callTool(String, String)}
+ * 执行任意工具,对具体工具类型零感知。
  *
  * <p><b>契约</b>:
  * <ul>
@@ -18,19 +23,22 @@ package com.example.claudedemo.agent.mcp;
 public interface McpToolClient extends AutoCloseable {
 
     /**
-     * 调用 MCP Server 的 get_schema 工具.
+     * 获取 MCP Server 注册的所有工具定义.
      *
-     * @return 数据库 schema 文本;失败时返回 {@code "Error: ..."}
+     * <p>返回结果直接用于构造 LLM 的 tools 参数.
+     *
+     * @return 工具定义列表;失败时返回空列表
      */
-    String getSchema();
+    List<ToolDefinition> listToolDefinitions();
 
     /**
-     * 调用 MCP Server 的 execute_sql 工具.
+     * 调用 MCP Server 的任意工具.
      *
-     * @param sql SQL 查询语句(仅 SELECT)
-     * @return JSON 格式的结果;失败时返回 {@code "Error: ..."}
+     * @param name          工具名(如 {@code get_schema})
+     * @param argumentsJson LLM 传来的参数 JSON 字符串(如 {@code {"sql":"SELECT 1"}})
+     * @return 工具执行结果;失败时返回 {@code "Error: ..."}
      */
-    String executeSql(String sql);
+    String callTool(String name, String argumentsJson);
 
     /**
      * 释放资源(如关闭子进程、网络连接).
