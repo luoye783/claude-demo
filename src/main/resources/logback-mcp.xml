@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MCP Server 专用 logback 配置:所有日志强制走 STDERR.
+
+  原因:STDOUT 被 MCP JSON-RPC 协议独占,任何日志污染都会让 Claude Code 解析失败.
+  启动方式:-Dlogback.configurationFile=logback-mcp.xml
+-->
+<configuration>
+
+    <!--
+      关闭 logback 内部 status 输出(默认会打 STDOUT,会污染协议帧)
+      排查时改回 OnConsoleStatusListener 即可
+    -->
+    <statusListener class="ch.qos.logback.core.status.NopStatusListener"/>
+
+    <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+        <target>System.err</target>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="STDERR"/>
+    </root>
+
+    <logger name="com.example.claudedemo" level="DEBUG"/>
+
+    <!--
+      MCP SDK 内部 reactor / netty 噪音较多,Step 1 阶段压到 WARN,
+      排查时再放开
+    -->
+    <logger name="io.modelcontextprotocol" level="WARN"/>
+    <logger name="reactor" level="WARN"/>
+
+</configuration>
