@@ -3,6 +3,7 @@ package com.example.claudedemo.agent.mcp;
 import com.example.claudedemo.agent.ToolCallRecord;
 import com.example.claudedemo.agent.ToolCallingExhaustedException;
 import com.example.claudedemo.agent.ToolCallingResult;
+import com.example.claudedemo.agent.memory.InMemoryConversationStore;
 import com.example.claudedemo.agent.trace.StepType;
 import com.example.claudedemo.agent.trace.TraceStep;
 import com.example.claudedemo.llm.ChatMessage;
@@ -69,7 +70,7 @@ class Nl2SqlMcpAgentTest {
         mcpToolClient = mock(McpToolClient.class);
         // listTools() 在 Agent 构造期调用;lenient() 允许部分测试覆盖为空列表
         lenient().when(mcpToolClient.listTools()).thenReturn(FAKE_TOOL_DEFS);
-        agent = new Nl2SqlMcpAgent(llmClient, mcpToolClient);
+        agent = new Nl2SqlMcpAgent(llmClient, mcpToolClient, new InMemoryConversationStore());
     }
 
     // ==================== Happy path ====================

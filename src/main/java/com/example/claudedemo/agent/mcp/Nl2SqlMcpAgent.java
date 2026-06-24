@@ -3,6 +3,9 @@ package com.example.claudedemo.agent.mcp;
 import com.example.claudedemo.agent.ToolCallRecord;
 import com.example.claudedemo.agent.ToolCallingExhaustedException;
 import com.example.claudedemo.agent.ToolCallingResult;
+import com.example.claudedemo.agent.memory.ConversationMemory;
+import com.example.claudedemo.agent.memory.ConversationStore;
+import com.example.claudedemo.agent.memory.ConversationTurn;
 import com.example.claudedemo.agent.trace.AgentTrace;
 import com.example.claudedemo.agent.trace.StepType;
 import com.example.claudedemo.agent.trace.TraceStep;
@@ -13,18 +16,29 @@ import com.example.claudedemo.llm.ToolCall;
 import com.example.claudedemo.llm.ToolDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * NL2SQL MCP Agent V1 — 通过 {@link McpToolClient} 调用 MCP Server 工具.
+ * NL2SQL MCP Agent V2 — 通过 {@link McpToolClient} 调用 MCP Server 工具,带短期会话记忆.
  *
  * <p>主流程与 {@link com.example.claudedemo.agent.Nl2SqlToolAgent Nl2SqlToolAgent} 一致：
  * 维护 {@code messages} 列表 → 循环调 LLM(带 tools) → 若 LLM 返回
  * {@code tool_calls} 则通过 McpToolClient 逐个执行并以 {@code role=tool} 追加结果 → 若
  * LLM 不再请求工具则将 content 作为最终答案返回。
+ *
+ * <p><b>V2 新增：短期会话记忆</b>
+ * <ul>
+ *   <li>新增 {@link #answer(String, String)} 方法,按 {@code sessionId} 关联历史</li>
+ *   <li>历史以 {@link ConversationTurn} 为单位保存：只保留用户提问与最终答案,
+ *       不含 tool_call / tool_result / schema / SQL 结果</li>
+ *   <li>超过 {@value ConversationMemory#MAX_TURNS} 轮后自动 FIFO 裁剪最旧 turn</li>
+ *   <li>异常分支(超过最大轮数)不写记忆,避免污染下次会话</li>
+ *   <li>旧 {@link #answer(String)} 保持无记忆模式,不破坏现有测试与调用方</li>
+ * </ul>
  *
  * <p><b>与 Nl2SqlToolAgent 的关键差异</b>：
  * <ul>
@@ -69,10 +83,28 @@ public class Nl2SqlMcpAgent {
     private final McpToolClient mcpToolClient;
     /** 工具定义(构造期一次性从 MCP Server 拉取,后续循环复用). */
     private final List<ToolDefinition> toolDefs;
+    /** 短期会话记忆存储(V2 新增,可为 null — null 时无记忆模式). */
+    private final ConversationStore memoryStore;
 
+    /**
+     * V1 兼容构造器:无会话记忆.
+     */
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient) {
+        this(llmClient, mcpToolClient, null);
+    }
+
+    /**
+     * V2 完整构造器:支持会话记忆.
+     *
+     * @param llmClient   LLM 客户端
+     * @param mcpToolClient MCP 工具客户端
+     * @param memoryStore  会话记忆存储(传入 null 则 agent 工作于无记忆模式)
+     */
+    @Autowired
+    public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient, ConversationStore memoryStore) {
         this.llmClient = llmClient;
         this.mcpToolClient = mcpToolClient;
+        this.memoryStore = memoryStore;
         // 启动时一次性拉取工具定义;拉取失败由 McpToolClient 内部吞掉异常并返回空列表,
         // 此处不抛,只 log.warn 提示(避免 MCP 暂时不可用导致整个 Agent Bean 启动失败).
         this.toolDefs = mcpToolClient.listTools();
@@ -86,34 +118,78 @@ public class Nl2SqlMcpAgent {
     }
 
     /**
-     * 回答一个自然语言问题.
+     * 回答一个自然语言问题(无记忆模式).
+     *
+     * <p>每次调用独立,不保存历史,不污染 {@link ConversationStore}.
      *
      * @param question 用户问题
      * @return 包含完整对话历史、工具调用记录、最终答案与执行 trace 的结果
      * @throws ToolCallingExhaustedException 当超过 {@value #MAX_ROUNDS} 轮 LLM 仍未给出最终答案
      */
     public ToolCallingResult answer(String question) {
+        return answerWithMemory(null, question);
+    }
+
+    /**
+     * 回答一个自然语言问题(有记忆模式).
+     *
+     * <p>根据 {@code sessionId} 从 {@link ConversationStore} 加载历史,
+     * 执行完 tool calling 循环后将本轮用户提问与最终答案写回记忆。
+     *
+     * <p>异常分支(超过最大轮数)不写记忆,避免污染下次会话。
+     *
+     * @param sessionId 会话 ID,不可为空
+     * @param question  用户问题
+     * @return 包含完整对话历史、工具调用记录、最终答案与执行 trace 的结果
+     * @throws IllegalArgumentException     当 sessionId 为空
+     * @throws ToolCallingExhaustedException 当超过 {@value #MAX_ROUNDS} 轮 LLM 仍未给出最终答案
+     */
+    public ToolCallingResult answer(String sessionId, String question) {
+        if (sessionId == null || sessionId.isBlank()) {
+            throw new IllegalArgumentException("sessionId must not be blank");
+        }
+        return answerWithMemory(sessionId, question);
+    }
+
+    /**
+     * 核心执行方法:支持可选记忆.
+     *
+     * @param sessionId 会话 ID,{@code null} 表示无记忆模式
+     * @param question  用户问题
+     * @return 执行结果
+     * @throws ToolCallingExhaustedException 超过最大轮数
+     */
+    private ToolCallingResult answerWithMemory(String sessionId, String question) {
         // 0. 初始化 trace,并在入口记录用户问题
         AgentTrace trace = new AgentTrace();
         trace.addStep(StepType.USER_QUESTION, question);
 
-        // 1. 初始化消息列表
+        // 1. 从 store 加载历史(无记忆模式跳过)
+        ConversationMemory memory = null;
+        if (sessionId != null && memoryStore != null) {
+            memory = memoryStore.getOrCreate(sessionId);
+        }
+
+        // 2. 拼装 LLM messages
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", SYSTEM_PROMPT));
+        if (memory != null && !memory.isEmpty()) {
+            messages.addAll(memory.toChatMessages());
+        }
         messages.add(new ChatMessage("user", question));
 
         List<ToolCallRecord> toolCalls = new ArrayList<>();
 
-        // 2. 循环
+        // 3. 工具调用循环
         for (int round = 1; round <= MAX_ROUNDS; round++) {
-            // 2.0 LLM 请求
+            // 3.0 LLM 请求
             trace.addStep(StepType.LLM_REQUEST, "round=" + round);
 
             long llmStart = System.currentTimeMillis();
             LlmResponse resp = llmClient.chatWithTools(messages, toolDefs);
             long llmDuration = System.currentTimeMillis() - llmStart;
 
-            // 2.1 无条件回填 assistant 消息
+            // 3.1 无条件回填 assistant 消息
             messages.add(new ChatMessage(
                     "assistant",
                     resp.content(),
@@ -121,21 +197,28 @@ public class Nl2SqlMcpAgent {
                     null
             ));
 
-            // 2.2 记录 LLM 响应
+            // 3.2 记录 LLM 响应
             String respContent = (resp.content() == null || resp.content().isEmpty())
                     ? "(tool call)"
                     : resp.content();
             trace.addStep(StepType.LLM_RESPONSE, respContent, llmDuration);
 
-            // 2.3 无 tool_calls → LLM 给出最终答案
+            // 3.3 无 tool_calls → LLM 给出最终答案
             List<ToolCall> calls = resp.toolCalls();
             if (calls == null || calls.isEmpty()) {
+                String finalAnswer = resp.content();
                 log.info("MCP Agent round={} 给出最终答案:{} 字符", round,
-                        resp.content() == null ? 0 : resp.content().length());
-                trace.addStep(StepType.FINAL_ANSWER, resp.content());
+                        finalAnswer == null ? 0 : finalAnswer.length());
+                trace.addStep(StepType.FINAL_ANSWER, finalAnswer);
+
+                // ★ 写回记忆(仅异常分支不写)
+                if (memory != null) {
+                    memory.addTurn(new ConversationTurn(question, finalAnswer));
+                }
+
                 return new ToolCallingResult(
                         question,
-                        resp.content(),
+                        finalAnswer,
                         List.copyOf(messages),
                         ToolCallRecord.copyOf(toolCalls),
                         round,
@@ -143,7 +226,7 @@ public class Nl2SqlMcpAgent {
                 );
             }
 
-            // 2.4 有 tool_calls → 逐个执行
+            // 3.4 有 tool_calls → 逐个执行
             for (ToolCall call : calls) {
                 String callLabel = describeCall(call);
                 trace.addStep(StepType.TOOL_CALL, callLabel);
@@ -161,7 +244,7 @@ public class Nl2SqlMcpAgent {
             }
         }
 
-        // 3. 超过最大轮数
+        // 4. 超过最大轮数 — 不写记忆(异常分支)
         log.error("MCP Agent 失败:已执行 {} 轮,LLM 始终未给出最终答案", MAX_ROUNDS);
         trace.addError("超过最大轮数 " + MAX_ROUNDS + ",LLM 始终未给出最终答案");
         throw new ToolCallingExhaustedException(
