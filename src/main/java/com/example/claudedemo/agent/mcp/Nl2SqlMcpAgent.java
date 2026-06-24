@@ -27,7 +27,7 @@ import java.util.List;
  *
  * <p><b>与 Nl2SqlToolAgent 的关键差异</b>：
  * <ul>
- *   <li>工具定义通过 {@link McpToolClient#listToolDefinitions()} 动态获取,而非硬编码或本地 AgentTool</li>
+ *   <li>工具定义通过 {@link McpToolClient#listTools()} 在构造期动态拉取,而非硬编码或本地 AgentTool</li>
  *   <li>工具执行通过 {@link McpToolClient#callTool(String, String)} 通用转发,无 switch/case 枚举</li>
  *   <li>不依赖 Spring 注解{@code @Component}(由调用方自己实例化)</li>
  * </ul>
@@ -56,20 +56,30 @@ public class Nl2SqlMcpAgent {
     private static final String SYSTEM_PROMPT = """
             你是 NL2SQL 助手。你可以使用工具查询数据库,然后用中文回答用户的问题。
             工具使用规则:
-            1. 必须先调用 get_schema 获取数据库表结构
-            2. 再调用 execute_sql 执行只读 SQL
+            1. 优先调用 schema 类工具了解数据库表结构
+            2. 再用 SQL/查询类工具获取实际数据
             3. 严格基于工具返回的实际数据作答,不要捏造表名/字段名/数值
-            4. 当工具返回 Error 字符串时,必须修改 SQL 或策略后再次调用,直到成功或信息充分
+            4. 当工具返回 Error 字符串时,必须修改策略后再次调用,直到成功或信息充分
             """;
 
     private final LlmClient llmClient;
     private final McpToolClient mcpToolClient;
-    /** 工具定义缓存(首次调用时从 McpToolClient 获取,后续复用). */
-    private List<ToolDefinition> toolDefs;
+    /** 工具定义(构造期一次性从 MCP Server 拉取,后续循环复用). */
+    private final List<ToolDefinition> toolDefs;
 
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient) {
         this.llmClient = llmClient;
         this.mcpToolClient = mcpToolClient;
+        // 启动时一次性拉取工具定义;拉取失败由 McpToolClient 内部吞掉异常并返回空列表,
+        // 此处不抛,只 log.warn 提示(避免 MCP 暂时不可用导致整个 Agent Bean 启动失败).
+        this.toolDefs = mcpToolClient.listTools();
+        if (this.toolDefs.isEmpty()) {
+            log.warn("Nl2SqlMcpAgent 构造期未从 MCP Server 拉取到任何工具,LLM 将无法调用工具");
+        } else {
+            log.info("Nl2SqlMcpAgent 已从 MCP Server 动态拉取 {} 个工具: {}",
+                    this.toolDefs.size(),
+                    this.toolDefs.stream().map(ToolDefinition::name).toList());
+        }
     }
 
     /**
@@ -84,26 +94,23 @@ public class Nl2SqlMcpAgent {
         AgentTrace trace = new AgentTrace();
         trace.addStep(StepType.USER_QUESTION, question);
 
-        // 1. 获取工具定义(首次调用时从 McpToolClient 获取)
-        List<ToolDefinition> resolvedToolDefs = resolveToolDefs();
-
-        // 2. 初始化消息列表
+        // 1. 初始化消息列表
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", SYSTEM_PROMPT));
         messages.add(new ChatMessage("user", question));
 
         List<ToolCallRecord> toolCalls = new ArrayList<>();
 
-        // 3. 循环
+        // 2. 循环
         for (int round = 1; round <= MAX_ROUNDS; round++) {
-            // 3.0 LLM 请求
+            // 2.0 LLM 请求
             trace.addStep(StepType.LLM_REQUEST, "round=" + round);
 
             long llmStart = System.currentTimeMillis();
-            LlmResponse resp = llmClient.chatWithTools(messages, resolvedToolDefs);
+            LlmResponse resp = llmClient.chatWithTools(messages, toolDefs);
             long llmDuration = System.currentTimeMillis() - llmStart;
 
-            // 3.1 无条件回填 assistant 消息
+            // 2.1 无条件回填 assistant 消息
             messages.add(new ChatMessage(
                     "assistant",
                     resp.content(),
@@ -111,13 +118,13 @@ public class Nl2SqlMcpAgent {
                     null
             ));
 
-            // 3.2 记录 LLM 响应
+            // 2.2 记录 LLM 响应
             String respContent = (resp.content() == null || resp.content().isEmpty())
                     ? "(tool call)"
                     : resp.content();
             trace.addStep(StepType.LLM_RESPONSE, respContent, llmDuration);
 
-            // 3.3 无 tool_calls → LLM 给出最终答案
+            // 2.3 无 tool_calls → LLM 给出最终答案
             List<ToolCall> calls = resp.toolCalls();
             if (calls == null || calls.isEmpty()) {
                 log.info("MCP Agent round={} 给出最终答案:{} 字符", round,
@@ -133,7 +140,7 @@ public class Nl2SqlMcpAgent {
                 );
             }
 
-            // 3.4 有 tool_calls → 逐个执行
+            // 2.4 有 tool_calls → 逐个执行
             for (ToolCall call : calls) {
                 String callLabel = describeCall(call);
                 trace.addStep(StepType.TOOL_CALL, callLabel);
@@ -151,7 +158,7 @@ public class Nl2SqlMcpAgent {
             }
         }
 
-        // 4. 超过最大轮数
+        // 3. 超过最大轮数
         log.error("MCP Agent 失败:已执行 {} 轮,LLM 始终未给出最终答案", MAX_ROUNDS);
         trace.addError("超过最大轮数 " + MAX_ROUNDS + ",LLM 始终未给出最终答案");
         throw new ToolCallingExhaustedException(
@@ -173,18 +180,6 @@ public class Nl2SqlMcpAgent {
         }
         String args = call.function().arguments();
         return mcpToolClient.callTool(call.function().name(), args == null ? "{}" : args);
-    }
-
-    /**
-     * 获取工具定义.
-     *
-     * <p>首次调用时向 McpToolClient 查询并缓存,后续复用.
-     */
-    private List<ToolDefinition> resolveToolDefs() {
-        if (toolDefs == null) {
-            toolDefs = mcpToolClient.listToolDefinitions();
-        }
-        return toolDefs;
     }
 
     /**

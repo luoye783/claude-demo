@@ -26,7 +26,7 @@ import java.util.Map;
  * <p><b>生命周期</b>:
  * <ol>
  *   <li>构造器:启动子进程 + 建立 MCP 连接 + 握手</li>
- *   <li>{@link #listToolDefinitions()}: 从 MCP Server 获取工具定义</li>
+ *   <li>{@link #listTools()}: 从 MCP Server 获取工具定义</li>
  *   <li>{@link #callTool(String, String)}: 调用任意 MCP 工具</li>
  *   <li>{@link #close()}: 关闭连接 + 停止子进程</li>
  * </ol>
@@ -76,14 +76,14 @@ public class StdioMcpToolClient implements McpToolClient {
     }
 
     @Override
-    public List<ToolDefinition> listToolDefinitions() {
+    public List<ToolDefinition> listTools() {
         try {
             McpSchema.ListToolsResult result = client.listTools();
             return result.tools().stream()
                     .map(StdioMcpToolClient::toToolDefinition)
                     .toList();
         } catch (Exception e) {
-            log.warn("listToolDefinitions 失败: {}", e.toString());
+            log.warn("listTools 失败: {}", e.toString());
             return List.of();
         }
     }
@@ -107,7 +107,7 @@ public class StdioMcpToolClient implements McpToolClient {
      * 获取 MCP Server 注册的工具名列表(仅用于集成测试验证).
      */
     public List<String> listToolNames() {
-        return listToolDefinitions().stream()
+        return listTools().stream()
                 .map(ToolDefinition::name)
                 .toList();
     }

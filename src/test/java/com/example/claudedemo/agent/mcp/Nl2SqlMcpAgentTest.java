@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -34,9 +35,13 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link Nl2SqlMcpAgent} 单元测试：mock LlmClient + mock McpToolClient.
+ * {@link Nl2SqlMcpAgent} 单元测试:mock LlmClient + mock McpToolClient.
  *
- * <p>不依赖任何 Spring 上下文、数据库或真实 MCP Server，纯逻辑测试。
+ * <p>不依赖任何 Spring 上下文、数据库或真实 MCP Server,纯逻辑测试.
+ *
+ * <p><b>关于 listTools mock 位置</b>:Agent 在构造期即拉取 tool defs 并缓存,
+ * 因此默认 stub 在 {@code @BeforeEach} 中完成({@code lenient()} 标记,允许部分测试
+ * 用空列表 stub 覆盖并重建 agent).
  *
  * @author claude-code
  * @since 0.0.1
@@ -62,6 +67,8 @@ class Nl2SqlMcpAgentTest {
     void setUp() {
         llmClient = mock(LlmClient.class);
         mcpToolClient = mock(McpToolClient.class);
+        // listTools() 在 Agent 构造期调用;lenient() 允许部分测试覆盖为空列表
+        lenient().when(mcpToolClient.listTools()).thenReturn(FAKE_TOOL_DEFS);
         agent = new Nl2SqlMcpAgent(llmClient, mcpToolClient);
     }
 
@@ -69,7 +76,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_call_get_schema_then_execute_sql_then_return_answer() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString()))
                 .thenReturn("表 USERS(id INT, name VARCHAR)");
         when(mcpToolClient.callTool(eq("execute_sql"), anyString()))
@@ -117,8 +123,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_return_directly_when_llm_answers_without_calling_tools() {
-        // Agent 首次调用会获取 tool definitions,即使 LLM 直接回答
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(llmClient.chatWithTools(anyList(), anyList()))
                 .thenReturn(new LlmResponse("数据库是空的。", "stop", null));
 
@@ -129,7 +133,8 @@ class Nl2SqlMcpAgentTest {
         assertTrue(result.toolCalls().isEmpty());
         assertEquals(3, result.messages().size());
         verify(llmClient, times(1)).chatWithTools(anyList(), anyList());
-        verify(mcpToolClient, times(1)).listToolDefinitions();
+        // listTools 仅在构造期被调用 1 次,answer 过程不再触发
+        verify(mcpToolClient, times(1)).listTools();
         verifyNoMoreInteractions(mcpToolClient);
     }
 
@@ -137,7 +142,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_pass_error_from_mcp_client_back_to_llm() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString()))
                 .thenReturn("Error: [ConnectionRefused] MCP server not available");
 
@@ -162,7 +166,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_return_error_string_for_unknown_tool_name() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("non_existent_tool"), anyString()))
                 .thenReturn("Error: [UnknownTool] unknown tool 'non_existent_tool'");
 
@@ -185,7 +188,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_throw_when_exceeding_max_rounds() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString()))
                 .thenReturn("schema info");
 
@@ -204,11 +206,10 @@ class Nl2SqlMcpAgentTest {
         assertEquals(2 + Nl2SqlMcpAgent.MAX_ROUNDS * 2, ex.getMessages().size());
     }
 
-    // ==================== Tool definitions ====================
+    // ==================== Tool definitions (V2: 动态拉取) ====================
 
     @Test
     void should_get_tool_definitions_from_mcp_client() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(llmClient.chatWithTools(anyList(), anyList()))
                 .thenReturn(new LlmResponse("ok", "stop", null));
 
@@ -223,14 +224,14 @@ class Nl2SqlMcpAgentTest {
         assertEquals(2, toolsSent.size());
         assertTrue(toolsSent.stream().anyMatch(t -> "get_schema".equals(t.name())));
         assertTrue(toolsSent.stream().anyMatch(t -> "execute_sql".equals(t.name())));
-        verify(mcpToolClient, times(1)).listToolDefinitions();
+        // 构造期已拉取,answer 过程不再重复调用
+        verify(mcpToolClient, times(1)).listTools();
     }
 
     // ==================== Tool call records ====================
 
     @Test
     void should_record_full_tool_call_records_in_result() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString()))
                 .thenReturn("表 USERS(id INT, name VARCHAR)");
         when(mcpToolClient.callTool(eq("execute_sql"), anyString()))
@@ -267,7 +268,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_record_complete_trace_with_correct_order() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString()))
                 .thenReturn("表 USERS(id INT, name VARCHAR)");
         when(mcpToolClient.callTool(eq("execute_sql"), anyString()))
@@ -334,7 +334,6 @@ class Nl2SqlMcpAgentTest {
 
     @Test
     void should_record_error_step_when_exceeding_max_rounds() {
-        when(mcpToolClient.listToolDefinitions()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString()))
                 .thenReturn("schema info");
 
@@ -355,6 +354,81 @@ class Nl2SqlMcpAgentTest {
         assertEquals(StepType.ERROR, steps.get(steps.size() - 1).stepType());
         assertTrue(steps.get(steps.size() - 1).content().contains("5"),
                 "ERROR 内容应说明超过最大轮数 5,实际:" + steps.get(steps.size() - 1).content());
+    }
+
+    // ==================== V2 新增:动态发现 / 构造期拉取 ====================
+
+    @Test
+    void should_load_tools_at_construction_time() {
+        // setUp() 中已创建 agent,此处断言构造期行为:
+        // 1) listTools 在构造期被调 1 次
+        // 2) 多次 answer() 不会重复调 listTools(已缓存)
+        verify(mcpToolClient, times(1)).listTools();
+
+        when(llmClient.chatWithTools(anyList(), anyList()))
+                .thenReturn(new LlmResponse("ok1", "stop", null))
+                .thenReturn(new LlmResponse("ok2", "stop", null));
+
+        agent.answer("q1");
+        agent.answer("q2");
+
+        // 仍然只 1 次 — answer 过程不再触发 listTools
+        verify(mcpToolClient, times(1)).listTools();
+    }
+
+    @Test
+    void should_use_dynamic_tool_definitions_for_llm() {
+        // 关键场景:listTools() 动态返回 [get_schema, execute_sql],
+        // 验证传给 LLM 的 tool definitions 恰好是这两个,顺序与 MCP Server 一致
+        when(llmClient.chatWithTools(anyList(), anyList()))
+                .thenReturn(new LlmResponse("done", "stop", null));
+
+        agent.answer("hello");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<ToolDefinition>> captor = ArgumentCaptor.forClass(List.class);
+        verify(llmClient, atLeastOnce()).chatWithTools(anyList(), captor.capture());
+
+        List<ToolDefinition> sent = captor.getValue();
+        assertEquals(2, sent.size());
+        // 顺序与 MCP 返回顺序一致(FAKE_TOOL_DEFS: get_schema 在前)
+        assertEquals("get_schema", sent.get(0).name());
+        assertEquals("execute_sql", sent.get(1).name());
+        // description 完整传递(非空且与 FAKE_TOOL_DEFS 一致)
+        assertTrue(sent.get(0).description().contains("表"),
+                "get_schema description 应包含 '表',实际:" + sent.get(0).description());
+        assertTrue(sent.get(1).description().contains("SELECT"),
+                "execute_sql description 应包含 'SELECT',实际:" + sent.get(1).description());
+        // parameters 完整传递
+        assertEquals("object", sent.get(0).parameters().get("type"));
+        assertEquals("object", sent.get(1).parameters().get("type"));
+        @SuppressWarnings("unchecked")
+        Map<String, Object> execProps = (Map<String, Object>) sent.get(1).parameters().get("properties");
+        assertNotNull(execProps);
+        assertTrue(execProps.containsKey("sql"), "execute_sql 应声明 sql 参数");
+    }
+
+    @Test
+    void should_log_warning_and_continue_when_no_tools_discovered() {
+        // 覆盖 setUp 的 stub:返回空列表
+        when(mcpToolClient.listTools()).thenReturn(List.of());
+        // 重建 agent — 构造期拉取空列表,只 log.warn 不抛
+        Nl2SqlMcpAgent emptyAgent = new Nl2SqlMcpAgent(llmClient, mcpToolClient);
+
+        // Agent 仍可正常工作(LLM 在没有工具的情况下应直接给答案)
+        when(llmClient.chatWithTools(anyList(), anyList()))
+                .thenReturn(new LlmResponse("抱歉,无可用工具。", "stop", null));
+
+        ToolCallingResult result = emptyAgent.answer("查");
+
+        assertNotNull(result);
+        assertEquals("抱歉,无可用工具。", result.answer());
+        assertEquals(1, result.rounds());
+        // setUp 中 agent 调 1 次 + 本测试 emptyAgent 调 1 次 = 2 次;
+        // 关键断言:emptyAgent 的 answer 过程不重复调 listTools(已缓存)
+        verify(mcpToolClient, times(2)).listTools();
+        emptyAgent.answer("再问");
+        verify(mcpToolClient, times(2)).listTools();
     }
 
     // ==================== helpers ====================
