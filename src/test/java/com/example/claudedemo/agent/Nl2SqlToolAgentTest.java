@@ -3,6 +3,8 @@ package com.example.claudedemo.agent;
 import com.example.claudedemo.agent.tools.AgentTool;
 import com.example.claudedemo.agent.tools.ExecuteSqlTool;
 import com.example.claudedemo.agent.tools.GetSchemaTool;
+import com.example.claudedemo.agent.trace.StepType;
+import com.example.claudedemo.agent.trace.TraceStep;
 import com.example.claudedemo.llm.ChatMessage;
 import com.example.claudedemo.llm.LlmClient;
 import com.example.claudedemo.llm.LlmResponse;
@@ -319,6 +321,109 @@ class Nl2SqlToolAgentTest {
         assertEquals("execute_sql", r1.toolName());
         assertTrue(r1.arguments().contains("SELECT * FROM USERS"));
         assertTrue(r1.result().contains("Alice"), "rows JSON 应含 Alice,实际:" + r1.result());
+    }
+
+    // ==================== Trace 验证(V1 已有断言零变更) ====================
+
+    @Test
+    void should_record_complete_trace_with_correct_order() {
+        // round1: get_schema -> round2: execute_sql -> round3: final answer
+        when(llmClient.chatWithTools(anyList(), anyList()))
+                .thenReturn(new LlmResponse(null, "tool_calls", List.of(
+                        toolCall("call_1", "get_schema", "{}")
+                )))
+                .thenReturn(new LlmResponse(null, "tool_calls", List.of(
+                        toolCall("call_2", "execute_sql", "{\"sql\":\"SELECT COUNT(*) FROM USERS\"}")
+                )))
+                .thenReturn(new LlmResponse("共有 3 个用户。", "stop", null));
+
+        ToolCallingResult result = agent.answer("用户表有多少人？");
+
+        // trace 存在且 traceId 非空
+        assertNotNull(result.trace());
+        assertFalse(result.trace().isEmpty());
+        assertNotNull(result.trace().traceId());
+        assertFalse(result.trace().traceId().isBlank());
+
+        // 步骤顺序: USER_QUESTION → LLM_REQUEST → LLM_RESPONSE → TOOL_CALL → TOOL_RESULT
+        //         → LLM_REQUEST → LLM_RESPONSE → TOOL_CALL → TOOL_RESULT
+        //         → LLM_REQUEST → LLM_RESPONSE → FINAL_ANSWER
+        List<StepType> expectedOrder = List.of(
+                StepType.USER_QUESTION,
+                StepType.LLM_REQUEST, StepType.LLM_RESPONSE,
+                StepType.TOOL_CALL, StepType.TOOL_RESULT,
+                StepType.LLM_REQUEST, StepType.LLM_RESPONSE,
+                StepType.TOOL_CALL, StepType.TOOL_RESULT,
+                StepType.LLM_REQUEST, StepType.LLM_RESPONSE,
+                StepType.FINAL_ANSWER
+        );
+        List<StepType> actualOrder = result.trace().steps().stream()
+                .map(TraceStep::stepType)
+                .toList();
+        assertEquals(expectedOrder, actualOrder);
+
+        // stepNo 单调递增从 1 开始
+        List<Integer> stepNos = result.trace().steps().stream()
+                .map(TraceStep::stepNo)
+                .toList();
+        for (int i = 0; i < stepNos.size(); i++) {
+            assertEquals(i + 1, stepNos.get(i), "stepNo 应从 1 连续递增");
+        }
+
+        // USER_QUESTION 内容是用户问题
+        assertEquals("用户表有多少人？", result.trace().steps().get(0).content());
+        // FINAL_ANSWER 内容是答案
+        TraceStep finalStep = result.trace().steps().get(
+                result.trace().steps().size() - 1);
+        assertEquals("共有 3 个用户。", finalStep.content());
+
+        // 耗时步骤的 timestamp / durationMs 字段均存在(允许为 0)
+        result.trace().steps().forEach(step -> {
+            assertTrue(step.timestampMs() > 0, "timestampMs 应已设置,实际:" + step.timestampMs());
+            assertNotNull(step.content(), "content 字段不应为 null");
+            assertTrue(step.durationMs() >= 0, "durationMs 不应为负,实际:" + step.durationMs());
+        });
+    }
+
+    @Test
+    void should_record_error_step_when_exceeding_max_rounds() {
+        when(llmClient.chatWithTools(anyList(), anyList()))
+                .thenReturn(new LlmResponse(null, "tool_calls", List.of(
+                        toolCall("call_loop", "get_schema", "{}")
+                )));
+
+        ToolCallingExhaustedException ex = assertThrows(
+                ToolCallingExhaustedException.class,
+                () -> agent.answer("查"));
+
+        // 异常携带的 trace 含 ERROR 步骤
+        assertNotNull(ex.getTrace());
+        assertNotNull(ex.getTrace().traceId());
+        // 最后一步必须是 ERROR
+        List<TraceStep> steps = ex.getTrace().steps();
+        assertFalse(steps.isEmpty());
+        assertEquals(StepType.ERROR, steps.get(steps.size() - 1).stepType());
+        assertTrue(steps.get(steps.size() - 1).content().contains("5"),
+                "ERROR 内容应说明超过最大轮数 5,实际:" + steps.get(steps.size() - 1).content());
+    }
+
+    @Test
+    void should_record_short_tool_result_path_when_llm_answers_directly() {
+        // LLM 不调用工具直接给答案:trace 中不应出现 TOOL_CALL / TOOL_RESULT
+        when(llmClient.chatWithTools(anyList(), anyList()))
+                .thenReturn(new LlmResponse("数据库是空的。", "stop", null));
+
+        ToolCallingResult result = agent.answer("数据库有什么？");
+
+        List<StepType> types = result.trace().steps().stream()
+                .map(TraceStep::stepType)
+                .toList();
+        // 期望: USER_QUESTION → LLM_REQUEST → LLM_RESPONSE → FINAL_ANSWER
+        assertEquals(
+                List.of(StepType.USER_QUESTION, StepType.LLM_REQUEST,
+                        StepType.LLM_RESPONSE, StepType.FINAL_ANSWER),
+                types
+        );
     }
 
     // ==================== helpers ====================

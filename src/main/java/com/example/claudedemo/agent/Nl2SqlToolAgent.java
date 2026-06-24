@@ -1,6 +1,9 @@
 package com.example.claudedemo.agent;
 
 import com.example.claudedemo.agent.tools.AgentTool;
+import com.example.claudedemo.agent.trace.AgentTrace;
+import com.example.claudedemo.agent.trace.StepType;
+import com.example.claudedemo.agent.trace.TraceStep;
 import com.example.claudedemo.llm.ChatMessage;
 import com.example.claudedemo.llm.LlmClient;
 import com.example.claudedemo.llm.LlmResponse;
@@ -45,6 +48,9 @@ public class Nl2SqlToolAgent {
     /** 最大循环轮数(每轮 = 1 次 LLM 调用),超过此上限抛 {@link ToolCallingExhaustedException}. */
     public static final int MAX_ROUNDS = 5;
 
+    /** trace 中工具结果展示的最大字符数. */
+    private static final int TOOL_RESULT_TRACE_LIMIT = 200;
+
     private static final String SYSTEM_PROMPT = """
             你是 NL2SQL 助手。你可以使用工具查询数据库,然后用中文回答用户的问题。
             工具使用规则:
@@ -72,10 +78,14 @@ public class Nl2SqlToolAgent {
      * 回答一个自然语言问题.
      *
      * @param question 用户问题
-     * @return 包含完整对话历史、工具调用记录与最终答案的结果
+     * @return 包含完整对话历史、工具调用记录、最终答案与执行 trace 的结果
      * @throws ToolCallingExhaustedException 当超过 {@value #MAX_ROUNDS} 轮 LLM 仍未给出最终答案
      */
     public ToolCallingResult answer(String question) {
+        // 0. 初始化 trace,并在入口记录用户问题
+        AgentTrace trace = new AgentTrace();
+        trace.addStep(StepType.USER_QUESTION, question);
+
         // 1. 初始化消息列表
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", SYSTEM_PROMPT));
@@ -90,7 +100,12 @@ public class Nl2SqlToolAgent {
 
         // 3. 循环
         for (int round = 1; round <= MAX_ROUNDS; round++) {
+            // 3.0 LLM 请求
+            trace.addStep(StepType.LLM_REQUEST, "round=" + round);
+
+            long llmStart = System.currentTimeMillis();
             LlmResponse resp = llmClient.chatWithTools(messages, toolDefs);
+            long llmDuration = System.currentTimeMillis() - llmStart;
 
             // 3.1 无条件回填 assistant 消息(OpenAI 协议要求 tool 消息前必须有 assistant)
             messages.add(new ChatMessage(
@@ -100,33 +115,55 @@ public class Nl2SqlToolAgent {
                     null
             ));
 
-            // 3.2 无 tool_calls → LLM 给出最终答案
+            // 3.2 记录 LLM 响应(content 文本或工具调用摘要)
+            String respContent = (resp.content() == null || resp.content().isEmpty())
+                    ? "(tool call)"
+                    : resp.content();
+            trace.addStep(StepType.LLM_RESPONSE, respContent, llmDuration);
+
+            // 3.3 无 tool_calls → LLM 给出最终答案
             List<ToolCall> calls = resp.toolCalls();
             if (calls == null || calls.isEmpty()) {
                 log.info("Tool Calling round={} 给出最终答案:{} 字符", round,
                         resp.content() == null ? 0 : resp.content().length());
+                trace.addStep(StepType.FINAL_ANSWER, resp.content());
                 return new ToolCallingResult(
                         question,
                         resp.content(),
                         List.copyOf(messages),
                         ToolCallRecord.copyOf(toolCalls),
-                        round
+                        round,
+                        trace
                 );
             }
 
-            // 3.3 有 tool_calls → 逐个执行,按 OpenAI 顺序追加 tool 消息
+            // 3.4 有 tool_calls → 逐个执行,按 OpenAI 顺序追加 tool 消息
             for (ToolCall call : calls) {
+                String callLabel = describeCall(call);
+                trace.addStep(StepType.TOOL_CALL, callLabel);
+
+                long toolStart = System.currentTimeMillis();
                 String result = executeTool(call);
+                long toolDuration = System.currentTimeMillis() - toolStart;
+
                 messages.add(new ChatMessage("tool", result, null, call.id()));
                 toolCalls.add(ToolCallRecord.of(call, result));
                 log.info("Tool Calling round={} 调用 {} -> {} 字符", round, call.function().name(),
                         result.length());
+
+                trace.addStep(StepType.TOOL_RESULT, summarizeForTrace(result), toolDuration);
             }
         }
 
         // 4. 超过最大轮数
         log.error("Tool Calling 失败:已执行 {} 轮,LLM 始终未给出最终答案,共 {} 次工具调用", MAX_ROUNDS, toolCalls.size());
-        throw new ToolCallingExhaustedException(MAX_ROUNDS, List.copyOf(messages), ToolCallRecord.copyOf(toolCalls));
+        trace.addError("超过最大轮数 " + MAX_ROUNDS + ",LLM 始终未给出最终答案");
+        throw new ToolCallingExhaustedException(
+                MAX_ROUNDS,
+                List.copyOf(messages),
+                ToolCallRecord.copyOf(toolCalls),
+                trace
+        );
     }
 
     /**
@@ -157,5 +194,38 @@ public class Nl2SqlToolAgent {
             log.warn("工具 {} 执行异常被兜底: {}", name, e.toString());
             return "Error: [" + e.getClass().getSimpleName() + "] " + e.getMessage();
         }
+    }
+
+    /**
+     * 生成工具调用 trace 摘要,格式 {@code "name args"}.args 过长会被截断以避免污染 trace.
+     */
+    private String describeCall(ToolCall call) {
+        if (call == null || call.function() == null) {
+            return "<malformed>";
+        }
+        String name = call.function().name();
+        String args = call.function().arguments();
+        if (args == null) {
+            return name + " {}";
+        }
+        if (args.length() <= TOOL_RESULT_TRACE_LIMIT) {
+            return name + " " + args;
+        }
+        return name + " " + args.substring(0, TOOL_RESULT_TRACE_LIMIT) + "...";
+    }
+
+    /**
+     * trace 中工具结果摘要,过长截断到 {@value #TOOL_RESULT_TRACE_LIMIT} 字符.
+     * <p>实际写入 {@link TraceStep} 时还会再被 {@link TraceStep} 自身的
+     * 500 字符截断兜底,这里是业务级可读性优化。
+     */
+    private String summarizeForTrace(String result) {
+        if (result == null) {
+            return "";
+        }
+        if (result.length() <= TOOL_RESULT_TRACE_LIMIT) {
+            return result;
+        }
+        return result.substring(0, TOOL_RESULT_TRACE_LIMIT) + "...";
     }
 }
