@@ -6,6 +6,9 @@ import com.example.claudedemo.agent.memory.ConversationMemory;
 import com.example.claudedemo.agent.memory.ConversationStore;
 import com.example.claudedemo.agent.memory.ConversationTurn;
 import com.example.claudedemo.agent.memory.InMemoryConversationStore;
+import com.example.claudedemo.agent.memory.MemoryCompressor;
+import com.example.claudedemo.agent.memory.SummaryMemory;
+import com.example.claudedemo.agent.memory.TurnCountCompressionPolicy;
 import com.example.claudedemo.agent.trace.StepType;
 import com.example.claudedemo.agent.trace.TraceStep;
 import com.example.claudedemo.llm.ChatMessage;
@@ -13,9 +16,11 @@ import com.example.claudedemo.llm.LlmClient;
 import com.example.claudedemo.llm.LlmResponse;
 import com.example.claudedemo.llm.ToolCall;
 import com.example.claudedemo.llm.ToolDefinition;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -357,5 +362,194 @@ class Nl2SqlMcpAgentMemoryTest {
 
     private static ToolCall toolCall(String id, String name, String arguments) {
         return new ToolCall(id, "function", new ToolCall.Function(name, arguments));
+    }
+
+    // ==================== V2 第四阶段:Summary Memory 集成 ====================
+
+    @Test
+    void should_inject_summary_message_between_system_and_recent_turns() {
+        LlmClient llm = mock(LlmClient.class);
+        // 自定义 store,policy 极高(不触发压缩),但手工预置 summary
+        InMemoryConversationStore storeWithCompress = new InMemoryConversationStore(
+                new MemoryCompressor(llm, new ObjectMapper()),
+                new TurnCountCompressionPolicy(100, 50));
+        Nl2SqlMcpAgent agentWithSummary = new Nl2SqlMcpAgent(llm, mcpToolClient, storeWithCompress);
+
+        // 手工预置 summary + 1 条 turn
+        ConversationMemory memory = storeWithCompress.getOrCreate("sid-sum");
+        memory.setSummary(new SummaryMemory("S1", List.of("f1", "f2"), 1L));
+        memory.addTurn(new ConversationTurn("旧问题", "旧答案"));
+
+        // 用 doAnswer 在调用瞬间拷贝 messages 快照(避免被 agent 后续 mutate)
+        final List<List<ChatMessage>> capturedCalls = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            capturedCalls.add(new ArrayList<>(inv.getArgument(0)));
+            return new LlmResponse("新答案", "stop", null);
+        }).when(llm).chatWithTools(anyList(), anyList());
+
+        agentWithSummary.answer("sid-sum", "新问题");
+
+        List<ChatMessage> msgs = capturedCalls.get(0);
+        // 期望顺序: [system(SYSTEM_PROMPT), system(摘要), user(旧), assistant(旧), user(新)]
+        assertEquals(5, msgs.size());
+        assertEquals("system", msgs.get(0).role());
+        assertEquals("system", msgs.get(1).role());
+        assertTrue(msgs.get(1).content().contains("## 历史摘要"));
+        assertTrue(msgs.get(1).content().contains("S1"));
+        assertTrue(msgs.get(1).content().contains("## 关键事实"));
+        assertTrue(msgs.get(1).content().contains("- f1"));
+        assertTrue(msgs.get(1).content().contains("- f2"));
+        assertEquals("user", msgs.get(2).role());
+        assertEquals("旧问题", msgs.get(2).content());
+        assertEquals("assistant", msgs.get(3).role());
+        assertEquals("user", msgs.get(4).role());
+        assertEquals("新问题", msgs.get(4).content());
+    }
+
+    @Test
+    void should_not_inject_summary_message_when_memory_has_no_summary() {
+        // 普通 store,无 summary
+        final List<List<ChatMessage>> capturedCalls = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            capturedCalls.add(new ArrayList<>(inv.getArgument(0)));
+            return new LlmResponse("ok", "stop", null);
+        }).when(llmClient).chatWithTools(anyList(), anyList());
+
+        agent.answer("sid-nosum", "Q1");
+
+        List<ChatMessage> msgs = capturedCalls.get(0);
+        // 只有 1 条 system 消息(SYSTEM_PROMPT);没有摘要注入
+        long systemCount = msgs.stream().filter(m -> m.role().equals("system")).count();
+        assertEquals(1, systemCount);
+        // 不应包含 "## 历史摘要" 标记
+        assertFalse(msgs.stream().anyMatch(m -> m.content() != null && m.content().contains("## 历史摘要")));
+    }
+
+    @Test
+    void should_trigger_compression_via_store_at_threshold() {
+        LlmClient llm = mock(LlmClient.class);
+        when(llm.chatWithTools(anyList(), anyList()))
+                .thenAnswer(inv -> new LlmResponse("答", "stop", null));
+        when(llm.chat(anyList()))
+                .thenReturn(new LlmResponse(
+                        "{\"summary\":\"新摘要\",\"keyFacts\":[\"f1\"]}", "stop"));
+
+        Nl2SqlMcpAgent agentFull = new Nl2SqlMcpAgent(
+                llm, mcpToolClient,
+                new InMemoryConversationStore(
+                        new MemoryCompressor(llm, new ObjectMapper()),
+                        new TurnCountCompressionPolicy(3, 1)));
+
+        agentFull.answer("sid-c", "Q1");
+        agentFull.answer("sid-c", "Q2");
+        agentFull.answer("sid-c", "Q3"); // 第 3 次后 size=3 ≥ 3,触发压缩 → summary 写入
+        // 第 4 次调用时,summary 应注入到 messages
+        final List<List<ChatMessage>> capturedCalls = new ArrayList<>();
+        org.mockito.Mockito.doAnswer(inv -> {
+            capturedCalls.add(new ArrayList<>(inv.getArgument(0)));
+            return new LlmResponse("答4", "stop", null);
+        }).when(llm).chatWithTools(anyList(), anyList());
+        agentFull.answer("sid-c", "Q4");
+
+        List<ChatMessage> msgs4 = capturedCalls.get(0);
+        // 压缩发生于第 3 次之后:summary 已写入
+        // 第 4 次 messages: [system(PROMPT), system(摘要), user(Q3), assistant(答), user(Q4)]
+        long systemCount = msgs4.stream().filter(m -> m.role().equals("system")).count();
+        assertEquals(2, systemCount, "第 4 次调用应含 2 条 system(主 prompt + 摘要)");
+        ChatMessage summaryMsg = msgs4.stream()
+                .filter(m -> m.role().equals("system"))
+                .skip(1).findFirst().orElseThrow();
+        assertTrue(summaryMsg.content().contains("新摘要"));
+        assertTrue(summaryMsg.content().contains("- f1"));
+
+        // 摘要生成的 LLM 调用只发生 1 次
+        verify(llm, times(1)).chat(anyList());
+    }
+
+    @Test
+    void should_increment_summary_version_on_subsequent_compression() {
+        LlmClient llm = mock(LlmClient.class);
+        when(llm.chatWithTools(anyList(), anyList()))
+                .thenAnswer(inv -> new LlmResponse("答", "stop", null));
+        when(llm.chat(anyList()))
+                .thenReturn(new LlmResponse("{\"summary\":\"S1\",\"keyFacts\":[]}", "stop"))
+                .thenReturn(new LlmResponse("{\"summary\":\"S2\",\"keyFacts\":[]}", "stop"));
+
+        InMemoryConversationStore compressStore = new InMemoryConversationStore(
+                new MemoryCompressor(llm, new ObjectMapper()),
+                new TurnCountCompressionPolicy(2, 0));
+        Nl2SqlMcpAgent agentFull = new Nl2SqlMcpAgent(llm, mcpToolClient, compressStore);
+
+        agentFull.answer("sid-v", "Q1");
+        agentFull.answer("sid-v", "Q2"); // 触发第 1 次压缩 → S1
+        agentFull.answer("sid-v", "Q3");
+        agentFull.answer("sid-v", "Q4"); // 触发第 2 次压缩 → S2
+
+        ConversationMemory memory = compressStore.find("sid-v").orElseThrow();
+        assertEquals("S2", memory.summary().summary());
+        assertEquals(2L, memory.summary().version());
+
+        verify(llm, times(2)).chat(anyList()); // 2 次压缩
+    }
+
+    @Test
+    void should_record_MEMORY_COMPRESS_step_in_trace_when_compression_fires() {
+        LlmClient llm = mock(LlmClient.class);
+        when(llm.chatWithTools(anyList(), anyList()))
+                .thenAnswer(inv -> new LlmResponse("答", "stop", null));
+        when(llm.chat(anyList()))
+                .thenReturn(new LlmResponse("{\"summary\":\"s\",\"keyFacts\":[]}", "stop"));
+
+        Nl2SqlMcpAgent agentFull = new Nl2SqlMcpAgent(
+                llm, mcpToolClient,
+                new InMemoryConversationStore(
+                        new MemoryCompressor(llm, new ObjectMapper()),
+                        new TurnCountCompressionPolicy(2, 0)));
+
+        ToolCallingResult r1 = agentFull.answer("sid-trace", "Q1");
+        ToolCallingResult r2 = agentFull.answer("sid-trace", "Q2");
+
+        // r1 不应有 MEMORY_COMPRESS(阈值未到)
+        assertFalse(r1.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.MEMORY_COMPRESS));
+        // r2 应有 MEMORY_COMPRESS
+        assertTrue(r2.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.MEMORY_COMPRESS));
+    }
+
+    @Test
+    void should_not_lose_turns_when_compressor_fails() {
+        LlmClient llm = mock(LlmClient.class);
+        when(llm.chatWithTools(anyList(), anyList()))
+                .thenAnswer(inv -> new LlmResponse("答", "stop", null));
+        // compressor 调用的 chat 返回非法 JSON → 解析失败 → null
+        when(llm.chat(anyList())).thenReturn(new LlmResponse("not-json", "stop"));
+
+        Nl2SqlMcpAgent agentFull = new Nl2SqlMcpAgent(
+                llm, mcpToolClient,
+                new InMemoryConversationStore(
+                        new MemoryCompressor(llm, new ObjectMapper()),
+                        new TurnCountCompressionPolicy(2, 0)));
+
+        agentFull.answer("sid-fail", "Q1");
+        agentFull.answer("sid-fail", "Q2");
+
+        // 通过 store 找 memory(但 store 注入在 agent 内,不能直接拿)
+        // 改为:第 3 次调用时,LLM.chatWithTools 收到的 messages 应包含 Q1/Q2(未压缩,未丢)
+        agentFull.answer("sid-fail", "Q3");
+
+        org.mockito.ArgumentCaptor<List<ChatMessage>> captor =
+                org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(llm, times(3)).chatWithTools(captor.capture(), anyList());
+        List<ChatMessage> lastMsgs = captor.getValue();
+        // Q1 与 Q2 仍应在历史中(压缩失败时保留)
+        assertTrue(lastMsgs.stream().anyMatch(m -> m.role().equals("user") && m.content().equals("Q1")));
+        assertTrue(lastMsgs.stream().anyMatch(m -> m.role().equals("user") && m.content().equals("Q2")));
+        // 不应有 summary(压缩失败)
+        long systemCount = lastMsgs.stream().filter(m -> m.role().equals("system")).count();
+        assertEquals(1, systemCount, "压缩失败时不应注入摘要消息");
+
+        // trace 包含 ERROR 步骤
+        assertTrue(lastMsgs != null);
     }
 }

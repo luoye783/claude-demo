@@ -132,4 +132,94 @@ class ConversationMemoryTest {
         assertTrue(memory.isEmpty());
         assertEquals(0, memory.size());
     }
+
+    // ==================== 摘要压缩(V2 第四阶段) ====================
+
+    @Test
+    void should_have_empty_summary_initially() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        assertTrue(memory.summary().isEmpty());
+        assertFalse(memory.hasSummary());
+    }
+
+    @Test
+    void should_set_and_get_summary() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        SummaryMemory s = new SummaryMemory("旧摘要", List.of("f1"), 1L);
+        memory.setSummary(s);
+        assertTrue(memory.hasSummary());
+        assertEquals("旧摘要", memory.summary().summary());
+        assertEquals(1L, memory.summary().version());
+    }
+
+    @Test
+    void should_treat_null_setSummary_as_empty() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        memory.setSummary(new SummaryMemory("x", List.of("y"), 1L));
+        memory.setSummary(null);
+        assertTrue(memory.summary().isEmpty());
+        assertFalse(memory.hasSummary());
+    }
+
+    @Test
+    void should_collect_turns_to_evict() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        for (int i = 1; i <= 5; i++) {
+            memory.addTurn(new ConversationTurn("q" + i, "a" + i));
+        }
+        // size=5, keepRecent=2 → 淘汰前 3 条
+        List<ConversationTurn> evicted = memory.turnsToEvict(2);
+        assertEquals(3, evicted.size());
+        assertEquals("q1", evicted.get(0).question());
+        assertEquals("a3", evicted.get(2).answer());
+        // 不可变副本
+        assertThrows(UnsupportedOperationException.class, () -> evicted.add(new ConversationTurn("x", "y")));
+        // 原 memory 不受影响
+        assertEquals(5, memory.size());
+    }
+
+    @Test
+    void should_return_empty_evict_when_size_le_keepRecent() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        memory.addTurn(new ConversationTurn("q1", "a1"));
+        memory.addTurn(new ConversationTurn("q2", "a2"));
+        assertTrue(memory.turnsToEvict(5).isEmpty());
+        assertTrue(memory.turnsToEvict(2).isEmpty());
+    }
+
+    @Test
+    void should_reject_negative_keepRecent() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        assertThrows(IllegalArgumentException.class, () -> memory.turnsToEvict(-1));
+    }
+
+    @Test
+    void should_drop_oldest_n_turns() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        for (int i = 1; i <= 5; i++) {
+            memory.addTurn(new ConversationTurn("q" + i, "a" + i));
+        }
+        memory.dropOldest(2);
+        assertEquals(3, memory.size());
+        assertEquals("q3", memory.turns().get(0).question());
+        assertEquals("q5", memory.turns().get(2).question());
+    }
+
+    @Test
+    void should_drop_oldest_noop_when_count_le_zero() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        memory.addTurn(new ConversationTurn("q", "a"));
+        memory.dropOldest(0);
+        memory.dropOldest(-5);
+        assertEquals(1, memory.size());
+    }
+
+    @Test
+    void should_drop_oldest_more_than_size_empties_turns() {
+        ConversationMemory memory = new ConversationMemory("session-1");
+        memory.addTurn(new ConversationTurn("q1", "a1"));
+        memory.addTurn(new ConversationTurn("q2", "a2"));
+        memory.dropOldest(10);
+        assertTrue(memory.isEmpty());
+    }
 }

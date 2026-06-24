@@ -27,5 +27,13 @@ public enum StepType {
     FINAL_ANSWER,
 
     /** 错误. */
-    ERROR
+    ERROR,
+
+    /**
+     * 会话记忆压缩(V2 第四阶段).
+     *
+     * <p>由 {@link com.example.claudedemo.agent.memory.InMemoryConversationStore}
+     * 在 turn 数超阈值时触发;content 包含被淘汰 turn 数、生成摘要字符数等。
+     */
+    MEMORY_COMPRESS
 }
