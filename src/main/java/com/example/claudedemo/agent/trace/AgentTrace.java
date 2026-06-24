@@ -1,5 +1,7 @@
 package com.example.claudedemo.agent.trace;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -30,6 +32,7 @@ public class AgentTrace {
     /**
      * 全局唯一轨迹 ID.
      */
+    @JsonProperty("traceId")
     public String traceId() {
         return traceId;
     }
@@ -58,6 +61,7 @@ public class AgentTrace {
     /**
      * 返回不可变副本.
      */
+    @JsonProperty("steps")
     public List<TraceStep> steps() {
         return List.copyOf(steps);
     }

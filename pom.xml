@@ -115,6 +115,12 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
+        <!-- Bean Validation:CLAUDE.md §5.4 要求 jakarta.validation 注解校验 Controller 入参 -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
         <!-- JDBC 启动器：包含 JdbcTemplate + HikariCP -->
         <dependency>
             <groupId>org.springframework.boot</groupId>

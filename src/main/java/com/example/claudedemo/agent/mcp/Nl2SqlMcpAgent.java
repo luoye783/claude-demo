@@ -13,6 +13,7 @@ import com.example.claudedemo.llm.ToolCall;
 import com.example.claudedemo.llm.ToolDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -29,7 +30,8 @@ import java.util.List;
  * <ul>
  *   <li>工具定义通过 {@link McpToolClient#listTools()} 在构造期动态拉取,而非硬编码或本地 AgentTool</li>
  *   <li>工具执行通过 {@link McpToolClient#callTool(String, String)} 通用转发,无 switch/case 枚举</li>
- *   <li>不依赖 Spring 注解{@code @Component}(由调用方自己实例化)</li>
+ *   <li>V2 起作为 Spring Bean 装配(由 {@link McpAgentConfig} 提供 {@link McpToolClient} 依赖);
+ *       纯单测场景仍可直接 {@code new Nl2SqlMcpAgent(llmClient, mcpToolClient)}</li>
  * </ul>
  *
  * <p><b>关键不变量</b>：
@@ -43,6 +45,7 @@ import java.util.List;
  * @author claude-code
  * @since 0.0.1
  */
+@Component
 public class Nl2SqlMcpAgent {
 
     private static final Logger log = LoggerFactory.getLogger(Nl2SqlMcpAgent.class);
