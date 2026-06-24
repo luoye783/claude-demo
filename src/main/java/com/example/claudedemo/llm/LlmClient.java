@@ -87,7 +87,13 @@ public class LlmClient {
                 .body(buildBody(messages, tools))
                 .retrieve()
                 .body(OpenAiResponse.class);
-        Choice first = resp.choices().get(0);
+        if (resp == null || resp.choices()==null){
+            throw new RuntimeException("chatWithTools cant get any response,please check llm api");
+        }
+        if (resp.choices().isEmpty()){
+            throw new RuntimeException("chatWithTools  response not contain choice,please check llm api");
+        }
+        Choice first = resp.choices().getFirst();
         return new LlmResponse(
                 first.message().content(),
                 first.finishReason(),
