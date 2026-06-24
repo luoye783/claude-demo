@@ -54,7 +54,7 @@ public class Nl2SqlMcpAgent {
     public static final int MAX_ROUNDS = 5;
 
     /** trace 中工具结果展示的最大字符数. */
-    private static final int TOOL_RESULT_TRACE_LIMIT = 200;
+    private static final int TOOL_RESULT_TRACE_LIMIT = 1000;
 
     private static final String SYSTEM_PROMPT = """
             你是 NL2SQL 助手。你可以使用工具查询数据库,然后用中文回答用户的问题。
