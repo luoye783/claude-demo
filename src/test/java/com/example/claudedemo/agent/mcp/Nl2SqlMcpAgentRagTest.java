@@ -64,7 +64,7 @@ class Nl2SqlMcpAgentRagTest {
         mcpToolClient = mock(McpToolClient.class);
         lenient().when(mcpToolClient.listTools()).thenReturn(FAKE_TOOL_DEFS);
         store = new InMemoryConversationStore();
-        ragRetriever = new InMemoryRagRetriever();
+        ragRetriever = new InMemoryRagRetriever(InMemoryRagRetriever.defaultDocuments());
         ragProps = new RagProperties();
     }
 
