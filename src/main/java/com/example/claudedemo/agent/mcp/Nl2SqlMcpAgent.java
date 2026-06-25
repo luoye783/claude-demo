@@ -7,9 +7,9 @@ import com.example.claudedemo.agent.memory.ConversationMemory;
 import com.example.claudedemo.agent.memory.ConversationStore;
 import com.example.claudedemo.agent.memory.ConversationTurn;
 import com.example.claudedemo.agent.memory.SummaryMemory;
+import com.example.claudedemo.agent.session.AgentSession;
 import com.example.claudedemo.agent.trace.AgentTrace;
 import com.example.claudedemo.agent.trace.StepType;
-import com.example.claudedemo.agent.trace.TraceStep;
 import com.example.claudedemo.llm.ChatMessage;
 import com.example.claudedemo.llm.LlmClient;
 import com.example.claudedemo.llm.LlmResponse;
@@ -44,11 +44,21 @@ import java.util.List;
  * <p><b>V2 第四阶段:摘要压缩</b>
  * <ul>
  *   <li>每次成功调用后通过 {@link ConversationStore#appendTurn} 写回,store 内部根据
- *       {@link CompressionPolicy} 决定是否触发 {@link MemoryCompressor} 生成
+ *       {@link com.example.claudedemo.agent.memory.CompressionPolicy} 决定是否触发
+ *       {@link com.example.claudedemo.agent.memory.MemoryCompressor} 生成
  *       {@link SummaryMemory} 并淘汰老 turn</li>
  *   <li>Agent 不感知压缩细节;messages 拼装时若 memory 携带 summary,自动插入
  *       一条 system 消息({@code ## 历史摘要 + ## 关键事实})作为 LLM 背景</li>
  *   <li>压缩 trace 步骤(若有)由 store 统一写入,Agent 不重复记录</li>
+ * </ul>
+ *
+ * <p><b>V2 第五阶段:AgentSession</b>
+ * <ul>
+ *   <li>本类内部不再分别操作 {@code memory}、{@code trace}、{@code tokenUsage}、
+ *       {@code metadata},而是把它们打包成 {@link AgentSession} 三段式工作:
+ *       {@code openSession} → {@code executeOnSession} → {@code finalizeSession}</li>
+ *   <li>公开方法签名、返回类型、异常类型、{@code ToolCallingResult} / {@code trace} 字段
+ *       全部保持不变;解耦 Memory / Trace 子系统</li>
  * </ul>
  *
  * <p><b>与 Nl2SqlToolAgent 的关键差异</b>：
@@ -125,7 +135,7 @@ public class Nl2SqlMcpAgent {
         }
     }
 
-    // ==================== 无记忆模式(独立路径) ====================
+    // ==================== 公开入口 ====================
 
     /**
      * 回答一个自然语言问题(无记忆模式).
@@ -138,72 +148,11 @@ public class Nl2SqlMcpAgent {
      * @throws ToolCallingExhaustedException 当超过 {@value #MAX_ROUNDS} 轮 LLM 仍未给出最终答案
      */
     public ToolCallingResult answer(String question) {
-        AgentTrace trace = new AgentTrace();
-        trace.addStep(StepType.USER_QUESTION, question);
-
-        List<ChatMessage> messages = new ArrayList<>();
-        messages.add(new ChatMessage("system", SYSTEM_PROMPT));
-        messages.add(new ChatMessage("user", question));
-
-        List<ToolCallRecord> toolCalls = new ArrayList<>();
-
-        for (int round = 1; round <= MAX_ROUNDS; round++) {
-            trace.addStep(StepType.LLM_REQUEST, "round=" + round);
-
-            long llmStart = System.currentTimeMillis();
-            LlmResponse resp = llmClient.chatWithTools(messages, toolDefs);
-            long llmDuration = System.currentTimeMillis() - llmStart;
-
-            messages.add(new ChatMessage("assistant", resp.content(), resp.toolCalls(), null));
-
-            String respContent = (resp.content() == null || resp.content().isEmpty())
-                    ? "(tool call)"
-                    : resp.content();
-            trace.addStep(StepType.LLM_RESPONSE, respContent, llmDuration);
-
-            List<ToolCall> calls = resp.toolCalls();
-            if (calls == null || calls.isEmpty()) {
-                log.info("MCP Agent round={} 给出最终答案:{} 字符", round,
-                        resp.content() == null ? 0 : resp.content().length());
-                trace.addStep(StepType.FINAL_ANSWER, resp.content());
-                return new ToolCallingResult(
-                        question,
-                        resp.content(),
-                        List.copyOf(messages),
-                        ToolCallRecord.copyOf(toolCalls),
-                        round,
-                        trace
-                );
-            }
-
-            for (ToolCall call : calls) {
-                String callLabel = describeCall(call);
-                trace.addStep(StepType.TOOL_CALL, callLabel);
-
-                long toolStart = System.currentTimeMillis();
-                String result = executeTool(call);
-                long toolDuration = System.currentTimeMillis() - toolStart;
-
-                messages.add(new ChatMessage("tool", result, null, call.id()));
-                toolCalls.add(ToolCallRecord.of(call, result));
-                log.info("MCP Agent round={} 通过 McpToolClient 调用 {} -> {} 字符",
-                        round, call.function().name(), result.length());
-
-                trace.addStep(StepType.TOOL_RESULT, summarizeForTrace(result), toolDuration);
-            }
-        }
-
-        log.error("MCP Agent 失败:已执行 {} 轮,LLM 始终未给出最终答案", MAX_ROUNDS);
-        trace.addError("超过最大轮数 " + MAX_ROUNDS + ",LLM 始终未给出最终答案");
-        throw new ToolCallingExhaustedException(
-                MAX_ROUNDS,
-                List.copyOf(messages),
-                ToolCallRecord.copyOf(toolCalls),
-                trace
-        );
+        AgentSession session = openSession(null, question);
+        List<ChatMessage> messages = buildInitialMessages(session, question);
+        ToolLoopResult loop = executeOnSession(session, question, messages);
+        return finalizeSession(session, question, loop);
     }
-
-    // ==================== 有记忆模式 ====================
 
     /**
      * 回答一个自然语言问题(有记忆模式).
@@ -211,7 +160,8 @@ public class Nl2SqlMcpAgent {
      * <p>根据 {@code sessionId} 从 {@link ConversationStore} 加载历史,
      * 执行完 tool calling 循环后通过 {@link ConversationStore#appendTurn}
      * 写回本轮问答。是否触发压缩、是否更新摘要、是否淘汰 turn 全部由
-     * {@link InMemoryConversationStore} 根据 {@link CompressionPolicy} 决定 —
+     * {@link com.example.claudedemo.agent.memory.InMemoryConversationStore} 根据
+     * {@link com.example.claudedemo.agent.memory.CompressionPolicy} 决定 —
      * Agent 不感知这些细节。
      *
      * <p>异常分支(超过最大轮数)不写记忆,避免污染下次会话。
@@ -226,18 +176,36 @@ public class Nl2SqlMcpAgent {
         if (sessionId == null || sessionId.isBlank()) {
             throw new IllegalArgumentException("sessionId must not be blank");
         }
+        AgentSession session = openSession(sessionId, question);
+        List<ChatMessage> messages = buildInitialMessages(session, question);
+        ToolLoopResult loop = executeOnSession(session, question, messages);
+        return finalizeSession(session, question, loop);
+    }
 
+    // ==================== Session 三段式 ====================
+
+    /**
+     * 打开一次 session:建 trace、加载 memory、初始化 tokenUsage / metadata.
+     *
+     * <p>无记忆模式(sid 为 null)时,memory 为 null,后续 messages 拼装跳过 summary 与 turn。
+     */
+    private AgentSession openSession(String sid, String question) {
+        ConversationMemory memory = (memoryStore != null && sid != null)
+                ? memoryStore.getOrCreate(sid)
+                : null;
         AgentTrace trace = new AgentTrace();
         trace.addStep(StepType.USER_QUESTION, question);
+        return new AgentSession(sid, memory, trace);
+    }
 
-        // 加载历史记忆
-        ConversationMemory memory = (memoryStore != null) ? memoryStore.getOrCreate(sessionId) : null;
-
-        // 拼装 messages: system + (可选)summary + recent turns + 当前问题
+    /**
+     * 根据 session 拼装初始 messages 列表:system + (可选)summary + recent turns + 当前问题.
+     */
+    private List<ChatMessage> buildInitialMessages(AgentSession session, String question) {
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(new ChatMessage("system", SYSTEM_PROMPT));
-        if (memory != null) {
-            // 摘要消息(若有):作为第二条 system 消息插入,LLM 视为历史背景
+        if (session.hasMemory()) {
+            ConversationMemory memory = session.memory();
             if (memory.hasSummary()) {
                 messages.add(new ChatMessage("system", buildSummaryMessage(memory)));
             }
@@ -246,55 +214,19 @@ public class Nl2SqlMcpAgent {
             }
         }
         messages.add(new ChatMessage("user", question));
-
-        // 执行工具调用循环
-        ToolLoopResult loopResult = executeToolLoop(question, messages, trace);
-
-        // 成功时通过 store.appendTurn 写回本轮问答;压缩由 store 内部完成
-        if (memory != null && loopResult.isSuccess()) {
-            memoryStore.appendTurn(sessionId,
-                    new ConversationTurn(question, loopResult.answer()),
-                    trace);
-        }
-
-        if (loopResult.isSuccess()) {
-            return loopResult.successResult;
-        } else {
-            throw loopResult.exhaustedException;
-        }
+        return messages;
     }
 
     /**
-     * 将 {@link SummaryMemory} 渲染为 LLM 可消费的第二条 system 消息.
+     * 在 session 上执行工具调用循环:从 {@code session.trace()} 记录步骤,
+     * 未来 LLM 返回 usage 时往 {@code session.tokenUsage()} 累加。
      *
-     * <p>格式: 历史摘要段 + 关键事实列表,使用 markdown 标题便于 LLM 解析。
+     * <p>成功时返回 {@link ToolLoopResult#success},失败(超最大轮数)返回
+     * {@link ToolLoopResult#failure} — 由调用方决定如何收尾。
      */
-    private String buildSummaryMessage(ConversationMemory memory) {
-        SummaryMemory s = memory.summary();
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("## 历史摘要\n");
-        sb.append(s.summary() == null ? "(空)" : s.summary());
-        if (s.keyFacts() != null && !s.keyFacts().isEmpty()) {
-            sb.append("\n\n## 关键事实\n");
-            for (String fact : s.keyFacts()) {
-                sb.append("- ").append(fact).append('\n');
-            }
-        }
-        return sb.toString();
-    }
-
-    // ==================== 工具调用循环(私有,被两个 answer 方法复用) ====================
-
-    /**
-     * 纯工具调用循环,不关心记忆。
-     *
-     * <p>接收已组装好的 {@code messages}(不含 memory 管理逻辑),执行 LLM 调用 + 工具执行循环。
-     * 成功时返回 {@link ToolLoopResult#success(ToolCallingResult)},失败时(超最大轮数)返回
-     * {@link ToolLoopResult#failure(ToolCallingExhaustedException)}。
-     *
-     * <p>本方法只负责执行,不做任何异常抛出/记忆写回 — 由调用方处理。
-     */
-    private ToolLoopResult executeToolLoop(String question, List<ChatMessage> messages, AgentTrace trace) {
+    private ToolLoopResult executeOnSession(AgentSession session, String question,
+                                            List<ChatMessage> messages) {
+        AgentTrace trace = session.trace();
         List<ToolCallRecord> toolCalls = new ArrayList<>();
 
         for (int round = 1; round <= MAX_ROUNDS; round++) {
@@ -303,6 +235,10 @@ public class Nl2SqlMcpAgent {
             long llmStart = System.currentTimeMillis();
             LlmResponse resp = llmClient.chatWithTools(messages, toolDefs);
             long llmDuration = System.currentTimeMillis() - llmStart;
+
+            // TODO 未来: 解析 resp.usage() 累加到 session.tokenUsage()
+            //  session.tokenUsage().addPrompt(resp.usage().promptTokens());
+            //  session.tokenUsage().addCompletion(resp.usage().completionTokens());
 
             messages.add(new ChatMessage("assistant", resp.content(), resp.toolCalls(), null));
 
@@ -353,6 +289,42 @@ public class Nl2SqlMcpAgent {
                 ToolCallRecord.copyOf(toolCalls),
                 trace
         ));
+    }
+
+    /**
+     * 收尾:成功时通过 store 写回 turn(由 store 决定是否压缩),失败时直接抛异常.
+     *
+     * <p>返回 {@link ToolLoopResult#successResult};若 loop 失败,异常已由 store 之外抛回调用方。
+     */
+    private ToolCallingResult finalizeSession(AgentSession session, String question, ToolLoopResult loop) {
+        if (loop.isSuccess()) {
+            if (session.hasMemory() && memoryStore != null) {
+                memoryStore.appendTurn(session.sessionId(),
+                        new ConversationTurn(question, loop.answer()),
+                        session.trace());
+            }
+            return loop.successResult;
+        }
+        throw loop.exhaustedException;
+    }
+
+    /**
+     * 将 {@link SummaryMemory} 渲染为 LLM 可消费的第二条 system 消息.
+     *
+     * <p>格式: 历史摘要段 + 关键事实列表,使用 markdown 标题便于 LLM 解析。
+     */
+    private String buildSummaryMessage(ConversationMemory memory) {
+        SummaryMemory s = memory.summary();
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("## 历史摘要\n");
+        sb.append(s.summary() == null ? "(空)" : s.summary());
+        if (s.keyFacts() != null && !s.keyFacts().isEmpty()) {
+            sb.append("\n\n## 关键事实\n");
+            for (String fact : s.keyFacts()) {
+                sb.append("- ").append(fact).append('\n');
+            }
+        }
+        return sb.toString();
     }
 
     /**
