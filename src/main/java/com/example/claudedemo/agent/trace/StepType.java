@@ -35,5 +35,15 @@ public enum StepType {
      * <p>由 {@link com.example.claudedemo.agent.memory.InMemoryConversationStore}
      * 在 turn 数超阈值时触发;content 包含被淘汰 turn 数、生成摘要字符数等。
      */
-    MEMORY_COMPRESS
+    MEMORY_COMPRESS,
+
+    /**
+     * RAG 检索(V2 第六阶段 RAG V1).
+     *
+     * <p>由 {@link com.example.claudedemo.agent.mcp.Nl2SqlMcpAgent} 在拼装 LLM
+     * messages 前调用 {@link com.example.claudedemo.agent.rag.RagRetriever} 后记录;
+     * content 含 query、topK、命中数、耗时。注意:当 {@code RagRetriever} 未装配时
+     * <b>不记录</b>此步骤,保持老 trace 形状兼容。
+     */
+    RAG_RETRIEVE
 }

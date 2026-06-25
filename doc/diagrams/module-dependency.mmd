@@ -1,0 +1,27 @@
+graph TD
+    Controller[controller/] --> Agent[agent/mcp/Nl2SqlMcpAgent]
+    Agent --> Session[agent/session/]
+    Agent --> Store[agent/memory/ConversationStore]
+    Agent --> McpClient[agent/mcp/McpToolClient]
+    Store -.implements.-> InMem[agent/memory/InMemoryConversationStore]
+    InMem --> Compressor[agent/memory/MemoryCompressor]
+    InMem --> Policy[agent/memory/CompressionPolicy]
+    Compressor --> LlmClient[llm/LlmClient]
+    McpClient -.implemented by.-> Stdio[agent/mcp/StdioMcpToolClient]
+    Stdio -->|STDIO| Sub[mcp/server/McpServerFactory]
+    Sub --> Tool[agent/tools/]
+    Tool --> Sql[sql/SqlValidator + SqlExecutor]
+
+    classDef rt fill:#ffd8b1
+    classDef mem fill:#c8e6c9
+    classDef mcp fill:#bbdefb
+    classDef llm fill:#f8bbd0
+    classDef tool fill:#d1c4e9
+    classDef sql fill:#ffccbc
+
+    class Agent,Session rt
+    class Store,InMem,Compressor,Policy mem
+    class McpClient,Stdio,Sub mcp
+    class LlmClient llm
+    class Tool tool
+    class Sql sql

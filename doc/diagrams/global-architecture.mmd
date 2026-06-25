@@ -1,0 +1,62 @@
+graph TB
+    subgraph 接入层
+        Ctrl[McpAgentController<br/>POST /api/mcp/answer]
+    end
+
+    subgraph Runtime [Runtime · V2 第五阶段]
+        Agent[Nl2SqlMcpAgent<br/>openSession → executeOnSession → finalizeSession]
+        Session[AgentSession<br/>memory + trace + tokenUsage + metadata]
+    end
+
+    subgraph Memory [Memory · V2 第四阶段]
+        Store[ConversationStore<br/>appendTurn]
+        InMem[InMemoryConversationStore]
+        Compress[MemoryCompressor<br/>+ CompressionPolicy]
+        Summary[SummaryMemory]
+    end
+
+    subgraph MCP [MCP · V2 第二阶段]
+        MTC[McpToolClient 接口]
+        Stdio[StdioMcpToolClient]
+        Server[MCP Server 子进程<br/>McpServerFactory]
+    end
+
+    subgraph LLM [LLM · 通用客户端]
+        LlmClient[LlmClient<br/>chat / chatWithTools]
+    end
+
+    subgraph Tool [Tool · 业务执行]
+        GetSchema[GetSchemaTool]
+        ExecSql[ExecuteSqlTool]
+        Validator[SqlValidator]
+        Executor[SqlExecutor]
+    end
+
+    Ctrl --> Agent
+    Agent --> Session
+    Session --> Store
+    Agent --> MTC
+    MTC -.implements.-> Stdio
+    Stdio -->|STDIO JSON-RPC| Server
+    Server --> GetSchema
+    Server --> ExecSql
+    ExecSql --> Validator
+    ExecSql --> Executor
+    Store -.implements.-> InMem
+    InMem --> Compress
+    Compress --> LlmClient
+    Agent --> LlmClient
+
+    classDef runtime fill:#ffd8b1,stroke:#333,stroke-width:2px
+    classDef memory fill:#c8e6c9,stroke:#333,stroke-width:2px
+    classDef mcp fill:#bbdefb,stroke:#333,stroke-width:2px
+    classDef llm fill:#f8bbd0,stroke:#333,stroke-width:2px
+    classDef tool fill:#d1c4e9,stroke:#333,stroke-width:2px
+    classDef entry fill:#fff59d,stroke:#333,stroke-width:2px
+
+    class Agent,Session runtime
+    class Store,InMem,Compress,Summary memory
+    class MTC,Stdio,Server mcp
+    class LlmClient llm
+    class GetSchema,ExecSql,Validator,Executor tool
+    class Ctrl entry

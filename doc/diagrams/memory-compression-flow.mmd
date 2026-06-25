@@ -1,0 +1,21 @@
+flowchart TD
+    A[appendTurn sid, turn, trace] --> B[memory.addTurn]
+    B --> C{size >= threshold?}
+    C -->|No| Z[done]
+    C -->|Yes| D[turnsToEvict keepRecent]
+    D --> E[MemoryCompressor.compress oldSummary, evicted]
+    E --> F[LLM.chat prompt]
+    F --> G{JSON 解析成功?}
+    G -->|No| H[log warn + trace ERROR + 保留原状态]
+    G -->|Yes| I[setSummary newSummary]
+    I --> J[dropOldest evicted.size]
+    J --> K[trace.addStep MEMORY_COMPRESS]
+    K --> Z
+
+    classDef ok fill:#c8e6c9
+    classDef err fill:#ffcdd2
+    classDef step fill:#bbdefb
+
+    class Z,I,J ok
+    class H err
+    class K,A,B,C,D,E,F,G step

@@ -1,0 +1,48 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant Ctrl as McpAgentController
+    participant Agent as Nl2SqlMcpAgent
+    participant Sess as AgentSession
+    participant Store as ConversationStore
+    participant Llm as LlmClient
+    participant Mcp as McpToolClient
+    participant Sub as MCP Server
+    participant Sql as SqlExecutor
+
+    User->>Ctrl: POST /api/mcp/answer
+    Ctrl->>Agent: answer(sessionId, q)
+
+    rect rgb(220, 240, 255)
+        Note over Agent,Sess: openSession
+        Agent->>Store: getOrCreate(sid)
+        Agent->>Sess: new AgentSession
+    end
+
+    rect rgb(220, 255, 220)
+        Note over Agent,Sess: buildInitialMessages
+        Agent->>Sess: 读 memory
+        Sess-->>Agent: messages
+    end
+
+    rect rgb(255, 240, 220)
+        Note over Agent,Sql: executeOnSession loop
+        Agent->>Llm: chatWithTools
+        Llm-->>Agent: tool_calls
+        Agent->>Mcp: callTool
+        Mcp->>Sub: tools/call
+        Sub->>Sql: execute
+        Sql-->>Sub: rows
+        Sub-->>Mcp: result
+        Mcp-->>Agent: result
+        Agent->>Llm: chatWithTools
+        Llm-->>Agent: content(无 tool_calls)
+    end
+
+    rect rgb(240, 220, 255)
+        Note over Agent,Store: finalizeSession
+        Agent->>Store: appendTurn(sid, turn, trace)
+    end
+
+    Agent-->>Ctrl: ToolCallingResult
+    Ctrl-->>User: 200

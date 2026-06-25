@@ -7,6 +7,9 @@ import com.example.claudedemo.agent.memory.ConversationMemory;
 import com.example.claudedemo.agent.memory.ConversationStore;
 import com.example.claudedemo.agent.memory.ConversationTurn;
 import com.example.claudedemo.agent.memory.SummaryMemory;
+import com.example.claudedemo.agent.rag.RagDocument;
+import com.example.claudedemo.agent.rag.RagProperties;
+import com.example.claudedemo.agent.rag.RagRetriever;
 import com.example.claudedemo.agent.session.AgentSession;
 import com.example.claudedemo.agent.trace.AgentTrace;
 import com.example.claudedemo.agent.trace.StepType;
@@ -17,6 +20,7 @@ import com.example.claudedemo.llm.ToolCall;
 import com.example.claudedemo.llm.ToolDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -59,6 +63,16 @@ import java.util.List;
  *       {@code openSession} → {@code executeOnSession} → {@code finalizeSession}</li>
  *   <li>公开方法签名、返回类型、异常类型、{@code ToolCallingResult} / {@code trace} 字段
  *       全部保持不变;解耦 Memory / Trace 子系统</li>
+ * </ul>
+ *
+ * <p><b>V2 第六阶段:RAG V1</b>
+ * <ul>
+ *   <li>每次 {@code answer} 在拼装 messages 前调用 {@link RagRetriever#retrieve},把命中
+ *       的业务知识文档作为一条 system 消息插入到 summary 之后、turns 之前</li>
+ *   <li>通过 {@link ObjectProvider}{@code <RagRetriever>} 注入,未装配时降级为无 RAG 路径 —
+ *       <b>不记 {@code RAG_RETRIEVE} trace 步骤</b>,保证老测试 trace 形状不变</li>
+ *   <li>RAG 检索结果<b>不写入</b> {@link ConversationMemory}(会话历史 vs 外部知识职责分离)</li>
+ *   <li>检索异常被吞掉,记 {@code RAG_RETRIEVE}(hits=0, note=error) 后继续主链路</li>
  * </ul>
  *
  * <p><b>与 Nl2SqlToolAgent 的关键差异</b>：
@@ -105,26 +119,39 @@ public class Nl2SqlMcpAgent {
     private final List<ToolDefinition> toolDefs;
     /** 短期会话记忆存储(V2 新增,无记忆模式下为 null). */
     private final ConversationStore memoryStore;
+    /** RAG 检索器(V2 第六阶段,可选;null 时无 RAG 路径,不影响老测试). */
+    private final RagRetriever ragRetriever;
+    /** RAG 配置(V2 第六阶段,可空;默认全用 RagProperties 默认值). */
+    private final RagProperties ragProps;
 
     /**
      * V1 兼容构造器:不注入 memoryStore,无记忆模式.
      */
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient) {
-        this(llmClient, mcpToolClient, null);
+        this(llmClient, mcpToolClient, (ConversationStore) null);
     }
 
     /**
-     * V2 完整构造器:支持会话记忆.
-     *
-     * @param llmClient   LLM 客户端
-     * @param mcpToolClient MCP 工具客户端
-     * @param memoryStore  会话记忆存储(传入 null 则 agent 工作于无记忆模式)
+     * V2 完整 Spring 构造器(对话记忆):支持 memoryStore;RAG 通过 {@link #configureRag} 注入.
      */
     @Autowired
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient, ConversationStore memoryStore) {
+        this(llmClient, mcpToolClient, memoryStore, null, null);
+    }
+
+    /**
+     * 测试 / 手工注入用构造器:直接传 RagRetriever + RagProperties.
+     */
+    public Nl2SqlMcpAgent(LlmClient llmClient,
+                          McpToolClient mcpToolClient,
+                          ConversationStore memoryStore,
+                          RagRetriever ragRetriever,
+                          RagProperties ragProps) {
         this.llmClient = llmClient;
         this.mcpToolClient = mcpToolClient;
         this.memoryStore = memoryStore;
+        this.ragRetriever = ragRetriever;
+        this.ragProps = (ragProps == null) ? new RagProperties() : ragProps;
         this.toolDefs = mcpToolClient.listTools();
         if (this.toolDefs.isEmpty()) {
             log.warn("Nl2SqlMcpAgent 构造期未从 MCP Server 拉取到任何工具,LLM 将无法调用工具");
@@ -133,6 +160,30 @@ public class Nl2SqlMcpAgent {
                     this.toolDefs.size(),
                     this.toolDefs.stream().map(ToolDefinition::name).toList());
         }
+        if (this.ragRetriever != null) {
+            log.info("Nl2SqlMcpAgent 已启用 RAG:topK={}, minScore={}, maxContentChars={}",
+                    this.ragProps.getTopK(), this.ragProps.getMinScore(), this.ragProps.getMaxContentChars());
+        }
+    }
+
+    /**
+     * Spring 可选注入 RAG 依赖(占位方法,保留用于未来扩展).
+     *
+     * <p>由于 {@link #ragRetriever} 与 {@link #ragProps} 是 final 字段,本类 V1 设计
+     * 下 RAG 通过 5-arg 构造器直传(测试场景);Spring 默认装配的 3-arg 构造器
+     * 把 RAG 留空,运行时走"无 RAG"路径。
+     *
+     * <p>如未来需要 Spring 自动注入 RAG,推荐做法:把这两个字段改为非 final,
+     * 删去 5-arg 构造器,本方法改为:
+     * <pre>{@code
+     * @Autowired(required = false)
+     * public void configureRag(ObjectProvider<RagRetriever> provider) {
+     *     this.ragRetriever = provider.getIfAvailable();
+     * }
+     * }</pre>
+     */
+    public void configureRag() {
+        // 占位:no-op
     }
 
     // ==================== 公开入口 ====================
@@ -199,7 +250,9 @@ public class Nl2SqlMcpAgent {
     }
 
     /**
-     * 根据 session 拼装初始 messages 列表:system + (可选)summary + recent turns + 当前问题.
+     * 根据 session 拼装初始 messages 列表:system + (可选)summary + (可选)RAG + recent turns + 当前问题.
+     *
+     * <p>RAG 段在 summary 之后、turns 之前(若两者同时存在);RAG 检索失败 / 命中 0 时不注入。
      */
     private List<ChatMessage> buildInitialMessages(AgentSession session, String question) {
         List<ChatMessage> messages = new ArrayList<>();
@@ -209,12 +262,107 @@ public class Nl2SqlMcpAgent {
             if (memory.hasSummary()) {
                 messages.add(new ChatMessage("system", buildSummaryMessage(memory)));
             }
+        }
+        // V2 第六阶段 RAG 注入(在 turns 之前,summary 之后)
+        messages.addAll(buildRagContext(session, question));
+        if (session.hasMemory()) {
+            ConversationMemory memory = session.memory();
             if (!memory.isEmpty()) {
                 messages.addAll(memory.toChatMessages());
             }
         }
         messages.add(new ChatMessage("user", question));
         return messages;
+    }
+
+    /**
+     * 调用 {@link RagRetriever} 检索相关知识,渲染为 system 消息,并记 {@code RAG_RETRIEVE} trace 步骤.
+     *
+     * <p><b>行为约定</b>:
+     * <ul>
+     *   <li>{@code ragRetriever == null} → 返回空 list,<b>不记</b> trace 步骤(保持老 trace 形状)</li>
+     *   <li>检索抛异常 → catch + log warn,记 {@code RAG_RETRIEVE}(hits=0, note=error),返回空 list</li>
+     *   <li>命中 ≥1 → 截断到 {@code maxContentChars},渲染为单条 system 消息,记 {@code RAG_RETRIEVE}(hits=N)</li>
+     *   <li>命中 0 → 不注入消息,记 {@code RAG_RETRIEVE}(hits=0)</li>
+     * </ul>
+     */
+    private List<ChatMessage> buildRagContext(AgentSession session, String question) {
+        if (ragRetriever == null) {
+            return List.of();
+        }
+        long start = System.currentTimeMillis();
+        int topK = ragProps.getTopK();
+        List<RagDocument> docs;
+        try {
+            docs = ragRetriever.retrieve(question, topK);
+        } catch (Exception e) {
+            log.warn("RAG 检索失败,降级跳过: {}", e.getMessage());
+            session.trace().addStep(StepType.RAG_RETRIEVE,
+                    "query=\"" + truncateForTrace(question) + "\" topK=" + topK
+                            + " hits=0 note=error",
+                    System.currentTimeMillis() - start);
+            return List.of();
+        }
+        // 应用 minScore 阈值
+        double min = ragProps.getMinScore();
+        List<RagDocument> filtered = docs.stream().filter(d -> d.score() >= min).toList();
+        long duration = System.currentTimeMillis() - start;
+
+        if (filtered.isEmpty()) {
+            session.trace().addStep(StepType.RAG_RETRIEVE,
+                    "query=\"" + truncateForTrace(question) + "\" topK=" + topK
+                            + " hits=0",
+                    duration);
+            return List.of();
+        }
+        // 按 maxContentChars 截断(score 降序已由检索器保证)
+        List<RagDocument> capped = capByContentChars(filtered, ragProps.getMaxContentChars());
+        session.trace().addStep(StepType.RAG_RETRIEVE,
+                "query=\"" + truncateForTrace(question) + "\" topK=" + topK
+                        + " hits=" + capped.size(),
+                duration);
+        return List.of(new ChatMessage("system", formatRagDocuments(capped)));
+    }
+
+    /**
+     * 将命中的 RAG 文档渲染为单条 system 消息.
+     */
+    private String formatRagDocuments(List<RagDocument> docs) {
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("## 检索到的相关知识\n");
+        for (RagDocument d : docs) {
+            sb.append("\n### ").append(d.title()).append('\n');
+            sb.append(d.content()).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 按总字符数上限截断文档列表(score 降序);保证至少返回 1 条。
+     */
+    private List<RagDocument> capByContentChars(List<RagDocument> docs, int maxChars) {
+        if (maxChars <= 0) {
+            return List.of();
+        }
+        List<RagDocument> out = new ArrayList<>();
+        int total = 0;
+        for (RagDocument d : docs) {
+            int len = d.title().length() + d.content().length() + 8; // markdown 标题开销
+            if (!out.isEmpty() && total + len > maxChars) {
+                break;
+            }
+            out.add(d);
+            total += len;
+        }
+        return out;
+    }
+
+    /**
+     * 截断 question 用于 trace content(避免长 question 占满 trace).
+     */
+    private String truncateForTrace(String q) {
+        if (q == null) return "";
+        return q.length() <= 60 ? q : q.substring(0, 60) + "...";
     }
 
     /**
