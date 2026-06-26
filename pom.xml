@@ -155,6 +155,25 @@
             <scope>runtime</scope>
         </dependency>
 
+        <!-- PostgreSQL + pgvector 驱动：RAG V5 持久化向量存储 -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- Testcontainers：PgVectorStore 集成测试 -->
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+
         <!--
           MCP Java SDK:暴露 get_schema / execute_sql 给 Claude Code
           详见 com.example.claudedemo.mcp 包
