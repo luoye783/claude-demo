@@ -165,6 +165,64 @@ class Nl2SqlMcpAgentPlannerTest {
         assertFalse(result.trace().steps().isEmpty());
     }
 
+    // ==================== V4 PlanExecutor 测试 ====================
+
+    @Test
+    void v4_trace_contains_plan_step_events() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(true);
+        ToolCallingResult result = agent.answer("查询用户");
+
+        boolean hasPlanStarted = result.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.PLAN_STEP_STARTED);
+        boolean hasPlanFinished = result.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.PLAN_STEP_FINISHED);
+
+        assertTrue(hasPlanStarted, "V4 trace 应包含 PLAN_STEP_STARTED");
+        assertTrue(hasPlanFinished, "V4 trace 应包含 PLAN_STEP_FINISHED");
+    }
+
+    @Test
+    void v4_trace_contains_plan_created_and_step_events() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(true);
+        ToolCallingResult result = agent.answer("查询用户");
+
+        List<TraceStep> steps = result.trace().steps();
+        int createdIdx = indexOf(steps, StepType.PLAN_CREATED);
+        int startedIdx = indexOf(steps, StepType.PLAN_STEP_STARTED);
+        int finishedIdx = indexOf(steps, StepType.PLAN_STEP_FINISHED);
+
+        assertTrue(createdIdx >= 0);
+        assertTrue(startedIdx >= 0);
+        assertTrue(finishedIdx >= 0);
+        // PLAN_CREATED 应在步骤事件之前
+        assertTrue(createdIdx < startedIdx, "PLAN_CREATED 应在 PLAN_STEP_STARTED 之前");
+    }
+
+    @Test
+    void v4_step_status_not_all_pending() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(true);
+        ToolCallingResult result = agent.answer("s2", "查询用户");
+
+        // trace 中 PLAN_STEP_FINISHED 的 status 不应全是 PENDING
+        boolean hasNonPending = result.trace().steps().stream()
+                .filter(s -> s.stepType() == StepType.PLAN_STEP_FINISHED)
+                .anyMatch(s -> s.content().contains("status=SUCCESS")
+                        || s.content().contains("status=SKIPPED"));
+        assertTrue(hasNonPending, "完成步骤的状态不应全是 PENDING");
+    }
+
+    @Test
+    void v4_planner_disabled_no_plan_events() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(false);
+        ToolCallingResult result = agent.answer("查询用户");
+
+        boolean hasAnyPlanEvent = result.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.PLAN_CREATED
+                        || s.stepType() == StepType.PLAN_STEP_STARTED
+                        || s.stepType() == StepType.PLAN_STEP_FINISHED);
+        assertFalse(hasAnyPlanEvent, "planner disabled 时不应有任何 PLAN_* trace");
+    }
+
     private int indexOf(List<TraceStep> steps, StepType type) {
         for (int i = 0; i < steps.size(); i++) {
             if (steps.get(i).stepType() == type) return i;

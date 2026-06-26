@@ -1,7 +1,7 @@
 package com.example.claudedemo.agent.planner;
 
 /**
- * Planner 单个执行步骤(Agent Runtime V3).
+ * Planner 单个执行步骤(Agent Runtime V4).
  *
  * @param stepId           步骤 ID,如 "step-1"
  * @param order            执行顺序(1-based)
@@ -23,5 +23,13 @@ public record AgentPlanStep(
     public AgentPlanStep {
         if (order < 1) order = 1;
         if (status == null) status = AgentPlanStepStatus.PENDING;
+    }
+
+    /**
+     * 返回一个新的 AgentPlanStep,仅 status 字段不同(V4 不可变状态流转).
+     */
+    public AgentPlanStep withStatus(AgentPlanStepStatus newStatus) {
+        return new AgentPlanStep(stepId, order, type, description,
+                expectedToolName, newStatus);
     }
 }

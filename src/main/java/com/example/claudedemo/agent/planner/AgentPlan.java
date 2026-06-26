@@ -1,5 +1,6 @@
 package com.example.claudedemo.agent.planner;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -29,6 +30,26 @@ public record AgentPlan(
 
     public AgentPlan(String question, List<AgentPlanStep> steps) {
         this(UUID.randomUUID().toString(), question, steps, System.currentTimeMillis());
+    }
+
+    /**
+     * 更新指定 step 的 status,返回新的 AgentPlan(V4 不可变状态流转).
+     *
+     * <p>stepId 不存在时返回原 plan(this).
+     */
+    public AgentPlan updateStepStatus(String stepId, AgentPlanStepStatus newStatus) {
+        List<AgentPlanStep> updated = new ArrayList<>(steps.size());
+        boolean found = false;
+        for (AgentPlanStep s : steps) {
+            if (s.stepId().equals(stepId)) {
+                updated.add(s.withStatus(newStatus));
+                found = true;
+            } else {
+                updated.add(s);
+            }
+        }
+        if (!found) return this;
+        return new AgentPlan(planId, question, updated, createdAtMs);
     }
 
     /**

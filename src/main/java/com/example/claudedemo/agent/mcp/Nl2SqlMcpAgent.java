@@ -8,6 +8,7 @@ import com.example.claudedemo.agent.memory.ConversationStore;
 import com.example.claudedemo.agent.memory.ConversationTurn;
 import com.example.claudedemo.agent.memory.SummaryMemory;
 import com.example.claudedemo.agent.planner.AgentPlan;
+import com.example.claudedemo.agent.planner.AgentPlanExecutor;
 import com.example.claudedemo.agent.planner.AgentPlanner;
 import com.example.claudedemo.agent.planner.PlannerProperties;
 import com.example.claudedemo.agent.rag.RagDocument;
@@ -130,6 +131,8 @@ public class Nl2SqlMcpAgent {
     private final AgentPlanner planner;
     /** Planner 配置(V3 新增,始终非 null). */
     private final PlannerProperties plannerProps;
+    /** PlanExecutor(V4 新增,始终非 null). */
+    private final AgentPlanExecutor planExecutor;
 
     /**
      * V1 兼容构造器:不注入 memoryStore,无记忆模式.
@@ -182,6 +185,7 @@ public class Nl2SqlMcpAgent {
         this.ragProps = (ragProps == null) ? new RagProperties() : ragProps;
         this.planner = planner;
         this.plannerProps = (plannerProps != null) ? plannerProps : new PlannerProperties();
+        this.planExecutor = new AgentPlanExecutor();
         this.toolDefs = mcpToolClient.listTools();
         if (this.toolDefs.isEmpty()) {
             log.warn("Nl2SqlMcpAgent 构造期未从 MCP Server 拉取到任何工具,LLM 将无法调用工具");
@@ -234,9 +238,10 @@ public class Nl2SqlMcpAgent {
      */
     public ToolCallingResult answer(String question) {
         AgentSession session = openSession(null, question);
-        generatePlan(session, question);
+        generateAndExecutePlan(session, question);
         List<ChatMessage> messages = buildInitialMessages(session, question);
         ToolLoopResult loop = executeOnSession(session, question, messages);
+        finalizePlan(session, loop.isSuccess());
         return finalizeSession(session, question, loop);
     }
 
@@ -263,24 +268,41 @@ public class Nl2SqlMcpAgent {
             throw new IllegalArgumentException("sessionId must not be blank");
         }
         AgentSession session = openSession(sessionId, question);
-        generatePlan(session, question);
+        generateAndExecutePlan(session, question);
         List<ChatMessage> messages = buildInitialMessages(session, question);
         ToolLoopResult loop = executeOnSession(session, question, messages);
+        finalizePlan(session, loop.isSuccess());
         return finalizeSession(session, question, loop);
     }
 
-    // ==================== Planner(V3 新增) ====================
+    // ==================== Planner(V4 更新) ====================
 
     /**
-     * 调用 Planner 生成执行计划,记录 trace + session metadata.
+     * 生成计划 → trace PLAN_CREATED → executeBeforeMainLoop 状态流转.
      *
-     * <p>仅在 planner 非 null 且 enabled 时生效;不改变后续执行逻辑。
+     * <p>仅在 planner 非 null 且 enabled 时生效。
      */
-    private void generatePlan(AgentSession session, String question) {
+    private void generateAndExecutePlan(AgentSession session, String question) {
         if (planner != null && plannerProps.isEnabled()) {
             AgentPlan plan = planner.plan(session, question);
             session.trace().addStep(StepType.PLAN_CREATED, plan.summary());
+
+            // V4: 状态流转(trace PLAN_STEP_STARTED / PLAN_STEP_FINISHED)
+            plan = planExecutor.executeBeforeMainLoop(session, plan, question);
             session.put("agentPlan", plan);
+        }
+    }
+
+    /**
+     * 主循环完成后收尾 plan:将 GENERATE_ANSWER 标记 SUCCESS / FAILED.
+     */
+    private void finalizePlan(AgentSession session, boolean success) {
+        if (planner != null && plannerProps.isEnabled()) {
+            AgentPlan plan = (AgentPlan) session.get("agentPlan");
+            if (plan != null) {
+                plan = planExecutor.finalizeAfterMainLoop(session, plan, success);
+                session.put("agentPlan", plan);
+            }
         }
     }
 
