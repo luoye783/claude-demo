@@ -3,11 +3,10 @@ package com.example.claudedemo.agent.rag;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * RAG 配置(V2 第八阶段 RAG V3).
+ * RAG 检索配置(V2 第九阶段 RAG V4).
  *
- * <p>对应 application.yml 中的 {@code rag} 配置块。
- *
- * <p><b>V3 新增</b>:{@link #retrievalMode} / {@link #embeddingDimension}
+ * <p>对应 application.yml 中的 {@code rag} 配置块,控制检索行为。
+ * Embedding API 连接信息见 {@link com.example.claudedemo.agent.rag.embedding.EmbeddingProperties}。
  *
  * @since 0.0.1
  */
@@ -25,9 +24,6 @@ public class RagProperties {
 
     /** 相邻 chunk 重叠字符数. */
     private int chunkOverlap = 100;
-
-    /** 向量维度(SimpleHashEmbeddingClient 用). */
-    private int embeddingDimension = 128;
 
     /** 检索返回文档数上限. */
     private int topK = 3;
@@ -68,14 +64,6 @@ public class RagProperties {
 
     public void setChunkOverlap(int chunkOverlap) {
         this.chunkOverlap = chunkOverlap;
-    }
-
-    public int getEmbeddingDimension() {
-        return embeddingDimension;
-    }
-
-    public void setEmbeddingDimension(int embeddingDimension) {
-        this.embeddingDimension = embeddingDimension;
     }
 
     public int getTopK() {

@@ -242,7 +242,6 @@ class InMemoryRagRetrieverTest {
                         "users 表存储用户基础信息", "kb/users.md", 0, java.util.Map.of()));
         RagProperties vecProps = new RagProperties();
         vecProps.setRetrievalMode(RetrievalMode.VECTOR);
-        vecProps.setEmbeddingDimension(32);
 
         var embedder = new com.example.claudedemo.agent.rag.embedding.SimpleHashEmbeddingClient(32);
         var vecStore = new com.example.claudedemo.agent.rag.store.InMemoryVectorStore();

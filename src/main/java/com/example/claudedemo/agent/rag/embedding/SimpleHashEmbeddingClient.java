@@ -1,6 +1,5 @@
 package com.example.claudedemo.agent.rag.embedding;
 
-import com.example.claudedemo.agent.rag.RagProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -46,10 +45,10 @@ public class SimpleHashEmbeddingClient implements EmbeddingClient {
     }
 
     /**
-     * 便捷构造器,从 {@link RagProperties} 取值.
+     * 便捷构造器,从 {@link EmbeddingProperties} 取值.
      */
-    public SimpleHashEmbeddingClient(RagProperties props) {
-        this(props == null ? 128 : props.getEmbeddingDimension());
+    public SimpleHashEmbeddingClient(EmbeddingProperties props) {
+        this(props == null ? 128 : props.getDimension());
     }
 
     @Override
