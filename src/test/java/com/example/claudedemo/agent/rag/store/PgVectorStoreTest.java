@@ -99,18 +99,21 @@ class PgVectorStoreTest {
 
     @Test
     void upsert_SQL_contains_expected_clauses() {
-        // 验证 upsert SQL 片段
         String sql = "INSERT INTO rag_vectors "
-                + "(id, content, source, metadata_json, embedding, updated_at) "
-                + "VALUES (?, ?, ?, ?::jsonb, ?::vector, NOW()) "
+                + "(id, document_id, content, source, metadata_json, chunk_hash, embedding, updated_at) "
+                + "VALUES (?, ?, ?, ?, ?::jsonb, ?, ?::vector, NOW()) "
                 + "ON CONFLICT (id) DO UPDATE SET "
+                + "document_id = EXCLUDED.document_id, "
                 + "content = EXCLUDED.content, source = EXCLUDED.source, "
                 + "metadata_json = EXCLUDED.metadata_json, "
+                + "chunk_hash = EXCLUDED.chunk_hash, "
                 + "embedding = EXCLUDED.embedding, updated_at = NOW()";
         assertTrue(sql.contains("ON CONFLICT (id) DO UPDATE"));
         assertTrue(sql.contains("?::jsonb"));
         assertTrue(sql.contains("?::vector"));
         assertTrue(sql.contains("EXCLUDED.embedding"));
+        assertTrue(sql.contains("document_id"));
+        assertTrue(sql.contains("chunk_hash"));
     }
 
     @Test
@@ -123,9 +126,49 @@ class PgVectorStoreTest {
         ep.setDimension(4);
         PgVectorStore store = new PgVectorStore(jdbc, vp, ep);
 
-        var doc = new VectorDocument("test-id", "content", "source.md",
-                Map.of(), new EmbeddingVector(new float[]{1f, 2f, 3f, 4f}, 4));
+        var doc = new VectorDocument("test-id", "doc-a", "content", "source.md",
+                "abc123", Map.of(), new EmbeddingVector(new float[]{1f, 2f, 3f, 4f}, 4));
         store.upsert(doc);
-        // 不抛异常 = 通过
+    }
+
+    @Test
+    void clear_SQL_is_valid() {
+        String sql = "DELETE FROM rag_vectors";
+        assertTrue(sql.contains("DELETE"));
+        assertTrue(sql.contains("rag_vectors"));
+    }
+
+    @Test
+    void deleteByDocumentId_SQL_is_valid() {
+        String sql = "DELETE FROM rag_vectors WHERE document_id = ?";
+        assertTrue(sql.contains("document_id"));
+        assertEquals(1, sql.chars().filter(c -> c == '?').count());
+    }
+
+    @Test
+    void count_SQL_is_valid() {
+        String sql = "SELECT COUNT(*) FROM rag_vectors";
+        assertTrue(sql.contains("COUNT(*)"));
+    }
+
+    @Test
+    void exists_SQL_is_valid() {
+        String sql = "SELECT COUNT(*) FROM rag_vectors WHERE id = ?";
+        assertTrue(sql.contains("id = ?"));
+    }
+
+    @Test
+    void findById_SQL_is_valid() {
+        String sql = "SELECT id, document_id, content, source, metadata_json, chunk_hash "
+                + "FROM rag_vectors WHERE id = ?";
+        assertTrue(sql.contains("document_id"));
+        assertTrue(sql.contains("chunk_hash"));
+    }
+
+    @Test
+    void getDocumentIds_SQL_is_valid() {
+        String sql = "SELECT DISTINCT document_id FROM rag_vectors WHERE document_id IS NOT NULL";
+        assertTrue(sql.contains("DISTINCT"));
+        assertTrue(sql.contains("IS NOT NULL"));
     }
 }

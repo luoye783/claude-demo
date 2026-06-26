@@ -2,6 +2,8 @@ package com.example.claudedemo.agent.rag;
 
 import com.example.claudedemo.agent.rag.chunker.SimpleTextChunker;
 import com.example.claudedemo.agent.rag.embedding.EmbeddingClient;
+import com.example.claudedemo.agent.rag.index.IndexProperties;
+import com.example.claudedemo.agent.rag.index.KnowledgeIndexService;
 import com.example.claudedemo.agent.rag.loader.MarkdownKnowledgeDocumentLoader;
 import com.example.claudedemo.agent.rag.store.InMemoryVectorStore;
 import com.example.claudedemo.agent.rag.store.VectorStore;
@@ -30,7 +32,7 @@ import org.springframework.core.io.support.ResourcePatternResolver;
  * @since 0.0.1
  */
 @Configuration
-@EnableConfigurationProperties(RagProperties.class)
+@EnableConfigurationProperties({RagProperties.class, IndexProperties.class})
 public class RagConfig {
 
     @Bean
@@ -63,5 +65,19 @@ public class RagConfig {
                                               EmbeddingClient embeddingClient,
                                               VectorStore vectorStore) {
         return new InMemoryRagRetriever(loader, chunker, props, embeddingClient, vectorStore);
+    }
+
+    /**
+     * 索引生命周期管理(V6 新增).
+     *
+     * <p>由开发者手动调用,Agent 不感知。
+     */
+    @Bean
+    public KnowledgeIndexService knowledgeIndexService(MarkdownKnowledgeDocumentLoader loader,
+                                                        SimpleTextChunker chunker,
+                                                        EmbeddingClient embeddingClient,
+                                                        VectorStore vectorStore,
+                                                        IndexProperties indexProps) {
+        return new KnowledgeIndexService(loader, chunker, embeddingClient, vectorStore, indexProps);
     }
 }

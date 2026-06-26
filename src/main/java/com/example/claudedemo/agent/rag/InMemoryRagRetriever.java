@@ -164,8 +164,8 @@ public class InMemoryRagRetriever implements RagRetriever {
                         for (KnowledgeChunk c : chunker.chunk(doc)) {
                             EmbeddingVector vec = embeddingClient.embed(c.content());
                             vectorStore.upsert(new VectorDocument(
-                                    c.id(), c.content(), c.source(),
-                                    c.metadataView(), vec));
+                                    c.id(), c.documentId(), c.content(), c.source(),
+                                    null, c.metadataView(), vec));
                             vecCount++;
                         }
                     } catch (Exception e) {

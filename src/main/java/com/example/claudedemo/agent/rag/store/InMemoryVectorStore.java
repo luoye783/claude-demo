@@ -6,10 +6,13 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 /**
- * 内存向量存储(V2 第八阶段 RAG V3).
+ * 内存向量存储(V2 第十一阶段 RAG V6).
  *
  * <p>基于 {@link ConcurrentHashMap} 的暴力余弦相似度搜索。
  * 适用于测试与演示场景,不适用于大规模数据。
@@ -17,6 +20,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p><b>搜索算法</b>:计算 query 与所有存储文档的余弦相似度,
  * 排序后返回 topK。假设向量已归一化(由 {@code EmbeddingClient} 保证),
  * 余弦相似度退化为点积,否则自动执行完整余弦计算。
+ *
+ * <p><b>V6 新增</b>:索引生命周期方法
+ * {@link #clear} / {@link #deleteByDocumentId} / {@link #count} /
+ * {@link #exists} / {@link #findById} / {@link #getDocumentIds}
  *
  * @since 0.0.1
  */
@@ -50,6 +57,48 @@ public class InMemoryVectorStore implements VectorStore {
         return List.copyOf(results);
     }
 
+    // ==================== 索引生命周期(V6 新增) ====================
+
+    @Override
+    public void clear() {
+        store.clear();
+    }
+
+    @Override
+    public void deleteByDocumentId(String documentId) {
+        if (documentId == null) return;
+        store.entrySet().removeIf(e -> {
+            String docId = e.getValue().documentId();
+            return documentId.equals(docId)
+                    || (docId == null && e.getKey().startsWith(documentId));
+        });
+    }
+
+    @Override
+    public long count() {
+        return store.size();
+    }
+
+    @Override
+    public boolean exists(String id) {
+        return id != null && store.containsKey(id);
+    }
+
+    @Override
+    public Optional<VectorDocument> findById(String id) {
+        return Optional.ofNullable(id == null ? null : store.get(id));
+    }
+
+    @Override
+    public Set<String> getDocumentIds() {
+        return store.values().stream()
+                .map(VectorDocument::documentId)
+                .filter(id -> id != null && !id.isBlank())
+                .collect(Collectors.toSet());
+    }
+
+    // ==================== 内部 ====================
+
     /**
      * 当前存储的文档数量.
      */
@@ -78,12 +127,5 @@ public class InMemoryVectorStore implements VectorStore {
         }
         double denom = Math.sqrt(normA) * Math.sqrt(normB);
         return (denom < 1e-12) ? 0.0 : dot / denom;
-    }
-
-    /**
-     * 清空所有记录(测试用).
-     */
-    public void clear() {
-        store.clear();
     }
 }

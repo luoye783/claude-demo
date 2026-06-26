@@ -7,6 +7,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -125,5 +127,79 @@ class InMemoryVectorStoreTest {
         assertEquals(2, store.size());
         store.upsert(doc("a", "A2"));
         assertEquals(2, store.size()); // 覆盖
+    }
+
+    // ==================== V6 新增测试 ====================
+
+    @Test
+    void count_returns_total() {
+        assertEquals(0, store.count());
+        store.upsert(doc("a", "A"));
+        assertEquals(1, store.count());
+        store.upsert(doc("b", "B"));
+        assertEquals(2, store.count());
+    }
+
+    @Test
+    void exists_returns_true_for_known_id() {
+        store.upsert(doc("k1", "v1"));
+        assertTrue(store.exists("k1"));
+    }
+
+    @Test
+    void exists_returns_false_for_unknown_id() {
+        assertFalse(store.exists("no-such-id"));
+    }
+
+    @Test
+    void exists_returns_false_for_null() {
+        assertFalse(store.exists(null));
+    }
+
+    @Test
+    void findById_returns_document() {
+        store.upsert(doc("k1", "v1"));
+        Optional<VectorDocument> found = store.findById("k1");
+        assertTrue(found.isPresent());
+        assertEquals("k1", found.get().id());
+        assertEquals("v1", found.get().content());
+    }
+
+    @Test
+    void findById_returns_empty_for_unknown() {
+        assertTrue(store.findById("no-such-id").isEmpty());
+    }
+
+    @Test
+    void deleteByDocumentId_removes_matching_chunks() {
+        VectorDocument d1 = new VectorDocument("docA-chunk-0", "docA", "c1", "src/a.md",
+                "hash1", Map.of(), embedder.embed("c1"));
+        VectorDocument d2 = new VectorDocument("docA-chunk-1", "docA", "c2", "src/a.md",
+                "hash2", Map.of(), embedder.embed("c2"));
+        VectorDocument d3 = new VectorDocument("docB-chunk-0", "docB", "c3", "src/b.md",
+                "hash3", Map.of(), embedder.embed("c3"));
+        store.upsert(d1);
+        store.upsert(d2);
+        store.upsert(d3);
+        assertEquals(3, store.count());
+
+        store.deleteByDocumentId("docA");
+        assertEquals(1, store.count());
+        assertTrue(store.exists("docB-chunk-0"));
+    }
+
+    @Test
+    void getDocumentIds_returns_distinct_document_ids() {
+        store.upsert(new VectorDocument("docA-chunk-0", "docA", "c1", "src/a.md",
+                null, Map.of(), embedder.embed("c1")));
+        store.upsert(new VectorDocument("docA-chunk-1", "docA", "c2", "src/a.md",
+                null, Map.of(), embedder.embed("c2")));
+        store.upsert(new VectorDocument("docB-chunk-0", "docB", "c3", "src/b.md",
+                null, Map.of(), embedder.embed("c3")));
+
+        Set<String> docIds = store.getDocumentIds();
+        assertEquals(2, docIds.size());
+        assertTrue(docIds.contains("docA"));
+        assertTrue(docIds.contains("docB"));
     }
 }
