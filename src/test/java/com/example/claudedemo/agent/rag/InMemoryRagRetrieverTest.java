@@ -1,5 +1,8 @@
 package com.example.claudedemo.agent.rag;
 
+import com.example.claudedemo.agent.rag.embedding.SimpleHashEmbeddingClient;
+import com.example.claudedemo.agent.rag.hybrid.HybridProperties;
+import com.example.claudedemo.agent.rag.store.InMemoryVectorStore;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -308,5 +311,130 @@ class InMemoryRagRetrieverTest {
         // 关键词检索应能通过 "上海" 命中 "上海市人口统计数据显示"
         List<RagDocument> docs = retriever.retrieve("上海", 3);
         assertFalse(docs.isEmpty(), "KEYWORD 模式即使传了 vector 组件也应走关键词");
+    }
+
+    // ==================== V7 Hybrid 测试 ====================
+
+    @Test
+    void hybrid_mode_returns_results() {
+        var props = new RagProperties();
+        props.setRetrievalMode(RetrievalMode.HYBRID);
+        var embedder = new SimpleHashEmbeddingClient(4);
+        var vecStore = new InMemoryVectorStore();
+        var hybridProps = new HybridProperties();
+        hybridProps.setKeywordTopK(5);
+        hybridProps.setVectorTopK(5);
+        hybridProps.setFinalTopK(3);
+
+        KnowledgeDocumentLoader loader = () -> java.util.List.of(
+                new KnowledgeDocument("test", "Test", "城市人口数据统计", "s.md", java.util.Map.of()));
+        TextChunker chunker = d -> java.util.List.of(
+                new KnowledgeChunk("t-c-0", "test", "Test",
+                        "城市人口数据统计", "s.md", 0, java.util.Map.of()));
+
+        InMemoryRagRetriever retriever = new InMemoryRagRetriever(
+                loader, chunker, props, embedder, vecStore, hybridProps);
+
+        List<RagDocument> results = retriever.retrieve("城市人口", 3);
+        assertFalse(results.isEmpty(), "HYBRID 模式应能召回结果");
+    }
+
+    @Test
+    void hybrid_mode_dedup_same_id() {
+        var props = new RagProperties();
+        props.setRetrievalMode(RetrievalMode.HYBRID);
+        var embedder = new SimpleHashEmbeddingClient(4);
+        var vecStore = new InMemoryVectorStore();
+        var hybridProps = new HybridProperties();
+        hybridProps.setKeywordTopK(5);
+        hybridProps.setVectorTopK(5);
+        hybridProps.setFinalTopK(5);
+
+        KnowledgeDocumentLoader loader = () -> java.util.List.of(
+                new KnowledgeDocument("a", "A", "相同内容出现在两条路径", "a.md", java.util.Map.of()));
+        TextChunker chunker = d -> java.util.List.of(
+                new KnowledgeChunk("a-c-0", "a", "A",
+                        "相同内容出现在两条路径", "a.md", 0, java.util.Map.of()));
+
+        InMemoryRagRetriever retriever = new InMemoryRagRetriever(
+                loader, chunker, props, embedder, vecStore, hybridProps);
+
+        List<RagDocument> results = retriever.retrieve("相同内容", 3);
+        assertFalse(results.isEmpty());
+        // 去重:同 id 只出现一次
+        long count = results.stream().map(RagDocument::id).filter("a-c-0"::equals).count();
+        assertEquals(1, count, "同 id 应去重");
+    }
+
+    @Test
+    void hybrid_mode_keyword_still_works() {
+        var props = new RagProperties();
+        props.setRetrievalMode(RetrievalMode.KEYWORD);
+        var embedder = new SimpleHashEmbeddingClient(4);
+        var vecStore = new InMemoryVectorStore();
+        var hybridProps = new HybridProperties();
+
+        KnowledgeDocumentLoader loader = () -> java.util.List.of(
+                new KnowledgeDocument("test", "Test", "city 字段", "s.md", java.util.Map.of()));
+        TextChunker chunker = d -> java.util.List.of(
+                new KnowledgeChunk("t-c-0", "test", "Test",
+                        "city 字段", "s.md", 0, java.util.Map.of()));
+
+        InMemoryRagRetriever retriever = new InMemoryRagRetriever(
+                loader, chunker, props, embedder, vecStore, hybridProps);
+
+        List<RagDocument> results = retriever.retrieve("city", 3);
+        assertFalse(results.isEmpty(), "KEYWORD 模式应保持原有行为");
+        assertEquals("KEYWORD",
+                results.get(0).metadataView().getOrDefault("retrievalType", ""));
+    }
+
+    @Test
+    void vector_mode_still_works_with_hybrid_constructor() {
+        var props = new RagProperties();
+        props.setRetrievalMode(RetrievalMode.VECTOR);
+        var embedder = new SimpleHashEmbeddingClient(4);
+        var vecStore = new InMemoryVectorStore();
+        var hybridProps = new HybridProperties();
+
+        KnowledgeDocumentLoader loader = () -> java.util.List.of(
+                new KnowledgeDocument("test", "Test", "hello world", "s.md", java.util.Map.of()));
+        TextChunker chunker = d -> java.util.List.of(
+                new KnowledgeChunk("t-c-0", "test", "Test",
+                        "hello world", "s.md", 0, java.util.Map.of()));
+
+        InMemoryRagRetriever retriever = new InMemoryRagRetriever(
+                loader, chunker, props, embedder, vecStore, hybridProps);
+
+        List<RagDocument> results = retriever.retrieve("hello world", 3);
+        assertFalse(results.isEmpty(), "VECTOR 模式应保持原有行为");
+    }
+
+    @Test
+    void hybrid_retrieval_respects_topK_parameter() {
+        var props = new RagProperties();
+        props.setRetrievalMode(RetrievalMode.HYBRID);
+        var embedder = new SimpleHashEmbeddingClient(4);
+        var vecStore = new InMemoryVectorStore();
+        var hybridProps = new HybridProperties();
+        hybridProps.setKeywordTopK(10);
+        hybridProps.setVectorTopK(10);
+        hybridProps.setFinalTopK(5);
+
+        KnowledgeDocumentLoader loader = () -> java.util.List.of(
+                new KnowledgeDocument("a", "A", "aaa", "a.md", java.util.Map.of()),
+                new KnowledgeDocument("b", "B", "bbb", "b.md", java.util.Map.of()),
+                new KnowledgeDocument("c", "C", "ccc", "c.md", java.util.Map.of()));
+        TextChunker chunker = d -> java.util.List.of(
+                new KnowledgeChunk(d.id() + "-c-0", d.id(), d.title(),
+                        d.content(), d.source(), 0, java.util.Map.of()));
+
+        InMemoryRagRetriever retriever = new InMemoryRagRetriever(
+                loader, chunker, props, embedder, vecStore, hybridProps);
+
+        // topK=2 入参应覆盖 finalTopK=5
+        List<RagDocument> results = retriever.retrieve("aaa bbb ccc", 2);
+        assertFalse(results.isEmpty());
+        assertTrue(results.size() <= 2, "入参 topK 应生效");
     }
 }

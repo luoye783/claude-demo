@@ -3,6 +3,8 @@ package com.example.claudedemo.agent.rag;
 import com.example.claudedemo.agent.rag.chunker.SimpleTextChunker;
 import com.example.claudedemo.agent.rag.embedding.EmbeddingClient;
 import com.example.claudedemo.agent.rag.embedding.EmbeddingVector;
+import com.example.claudedemo.agent.rag.hybrid.HybridProperties;
+import com.example.claudedemo.agent.rag.hybrid.RrfResultFusion;
 import com.example.claudedemo.agent.rag.loader.MarkdownKnowledgeDocumentLoader;
 import com.example.claudedemo.agent.rag.store.VectorDocument;
 import com.example.claudedemo.agent.rag.store.VectorSearchResult;
@@ -22,26 +24,25 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 内存版 RAG 检索器(V2 第八阶段 RAG V3).
+ * 内存版 RAG 检索器(V2 第十二阶段 RAG V7).
  *
- * <p><b>双检索路径</b>:
+ * <p><b>三检索路径</b>:
  * <ul>
  *   <li><b>关键词路径</b>:将 question 与每篇文档/chunk 的 {@code title + content} 做 token 集合相交,
  *       score = {@code 命中数 / max(qSize, docSize, 1)}</li>
  *   <li><b>向量路径</b>(V3):通过 {@link EmbeddingClient} 将 question 转为向量,
  *       经 {@link VectorStore#search} 返回余弦相似度结果</li>
+ *   <li><b>混合路径</b>(V7):双路检索 + RRF 融合,取长补短</li>
  * </ul>
- *
- * <p>两条路径在构造时共存;通过 {@link RetrievalMode} 配置选择,
- * 默认 {@code KEYWORD}(向后兼容)。
  *
  * <p><b>构造器</b>:
  * <ul>
  *   <li>{@link #InMemoryRagRetriever()} / {@link #InMemoryRagRetriever(List)} —— V1 兼容</li>
- *   <li>{@link #InMemoryRagRetriever(KnowledgeDocumentLoader, TextChunker, RagProperties)} —— V2 生产
- *       (仅关键词,遗留兼容,与 V3 无 vector 组件等价)</li>
- *   <li>{@link #InMemoryRagRetriever(KnowledgeDocumentLoader, TextChunker, RagProperties, EmbeddingClient, VectorStore)}
- *       —— V3 完整(关键词 + 向量双路径)</li>
+ *   <li>{@link #InMemoryRagRetriever(KnowledgeDocumentLoader, TextChunker, RagProperties)} —— V2 生产</li>
+ *   <li>{@link #InMemoryRagRetriever(KnowledgeDocumentLoader, TextChunker, RagProperties,
+ *       EmbeddingClient, VectorStore)} —— V3 完整</li>
+ *   <li>{@link #InMemoryRagRetriever(KnowledgeDocumentLoader, TextChunker, RagProperties,
+ *       EmbeddingClient, VectorStore, HybridProperties)} —— V7 hybrid</li>
  * </ul>
  *
  * @since 0.0.1
@@ -57,12 +58,16 @@ public class InMemoryRagRetriever implements RagRetriever {
     /** 检索条目列表(内部记录,预计算 token 集). */
     private final List<RetrievalEntry> entries;
 
-    /** 检索模式(KEYWORD / VECTOR). */
+    /** 检索模式(KEYWORD / VECTOR / HYBRID). */
     private final RetrievalMode retrievalMode;
-    /** Embedding 客户端(V3 可选,仅 vector 模式使用). */
+    /** Embedding 客户端(V3 可选,仅 vector/hybrid 模式使用). */
     private final EmbeddingClient embeddingClient;
-    /** 向量存储(V3 可选,仅 vector 模式使用). */
+    /** 向量存储(V3 可选,仅 vector/hybrid 模式使用). */
     private final VectorStore vectorStore;
+    /** Hybrid 配置(V7 可选). */
+    private final HybridProperties hybridProps;
+    /** RRF 融合器(V7 可选). */
+    private final RrfResultFusion rrfFusion;
 
     // ==================== V1 构造器(兼容) ====================
 
@@ -74,12 +79,12 @@ public class InMemoryRagRetriever implements RagRetriever {
         this.retrievalMode = RetrievalMode.KEYWORD;
         this.embeddingClient = null;
         this.vectorStore = null;
+        this.hybridProps = null;
+        this.rrfFusion = null;
     }
 
     /**
      * V1 兼容构造器:接受预构造的 {@link RagDocument} 列表.
-     *
-     * <p>用于测试、无知识库场景、或手工构造 RagDocument 的场景。
      *
      * @param documents RagDocument 列表;null / 空视为空语料
      */
@@ -90,45 +95,57 @@ public class InMemoryRagRetriever implements RagRetriever {
         this.retrievalMode = RetrievalMode.KEYWORD;
         this.embeddingClient = null;
         this.vectorStore = null;
+        this.hybridProps = null;
+        this.rrfFusion = null;
     }
 
     // ==================== V2 生产构造器(仅有关键词) ====================
 
     /**
      * V2 生产构造器:从知识库加载文档 → 切分 chunk → 建立索引.
-     *
-     * <p>同 {@link #InMemoryRagRetriever(KnowledgeDocumentLoader, TextChunker, RagProperties, EmbeddingClient, VectorStore)}),
-     * 但不传入 embedding/vector 组件,仅启用关键词检索。
      */
     public InMemoryRagRetriever(KnowledgeDocumentLoader loader,
                                  TextChunker chunker,
                                  RagProperties props) {
-        this(loader, chunker, props, null, null);
+        this(loader, chunker, props, null, null, null);
     }
 
     // ==================== V3 完整生产构造器 ====================
 
     /**
      * V3 完整构造器:关键词 + 向量双路径.
-     *
-     * <p>关键词路径始终初始化(构造时载入 + 切分 + 建立 token 索引)。
-     * 向量路径仅在 {@code props.retrievalMode == VECTOR && embeddingClient != null && vectorStore != null}
-     * 时初始化(embed + upsert)。
-     *
-     * @param loader          文档加载器
-     * @param chunker         文本切分器
-     * @param props           配置(含 retrievalMode)
-     * @param embeddingClient Embedding 客户端;vector 模式必填,keyword 可空
-     * @param vectorStore     向量存储;vector 模式必填,keyword 可空
      */
     public InMemoryRagRetriever(KnowledgeDocumentLoader loader,
                                  TextChunker chunker,
                                  RagProperties props,
                                  EmbeddingClient embeddingClient,
                                  VectorStore vectorStore) {
+        this(loader, chunker, props, embeddingClient, vectorStore, null);
+    }
+
+    // ==================== V7 完整构造器(Hybrid) ====================
+
+    /**
+     * V7 完整构造器:关键词 + 向量 + Hybrid 三路径.
+     *
+     * @param loader          文档加载器
+     * @param chunker         文本切分器
+     * @param props           配置(含 retrievalMode)
+     * @param embeddingClient Embedding 客户端
+     * @param vectorStore     向量存储
+     * @param hybridProps     Hybrid 配置;hybrid 模式必填
+     */
+    public InMemoryRagRetriever(KnowledgeDocumentLoader loader,
+                                 TextChunker chunker,
+                                 RagProperties props,
+                                 EmbeddingClient embeddingClient,
+                                 VectorStore vectorStore,
+                                 HybridProperties hybridProps) {
         this.retrievalMode = (props == null) ? RetrievalMode.KEYWORD : props.getRetrievalMode();
         this.embeddingClient = embeddingClient;
         this.vectorStore = vectorStore;
+        this.hybridProps = hybridProps;
+        this.rrfFusion = hybridProps != null ? new RrfResultFusion(hybridProps.getRrfK()) : null;
 
         // 关键词路径: loader → chunker → tokenize (always)
         List<RetrievalEntry> tmp = new ArrayList<>();
@@ -153,10 +170,12 @@ public class InMemoryRagRetriever implements RagRetriever {
         this.entries = List.copyOf(tmp);
         log.info("关键词索引: {} 个条目", this.entries.size());
 
-        // 向量路径: embed → vectorStore.upsert
-        if (retrievalMode == RetrievalMode.VECTOR) {
+        // 向量路径: embed → vectorStore.upsert (vector / hybrid 模式)
+        boolean needVector = retrievalMode == RetrievalMode.VECTOR
+                || retrievalMode == RetrievalMode.HYBRID;
+        if (needVector) {
             if (embeddingClient == null || vectorStore == null) {
-                log.warn("VECTOR 模式但 embeddingClient/vectorStore 为 null,退化到关键词");
+                log.warn("{} 模式但 embeddingClient/vectorStore 为 null,退化到关键词", retrievalMode);
             } else {
                 int vecCount = 0;
                 for (KnowledgeDocument doc : (tryLoad(loader))) {
@@ -175,6 +194,12 @@ public class InMemoryRagRetriever implements RagRetriever {
                 log.info("向量索引: {} 个文档, {} 个向量",
                         tryLoad(loader).size(), vecCount);
             }
+        }
+
+        if (retrievalMode == RetrievalMode.HYBRID && hybridProps != null) {
+            log.info("Hybrid 检索: kwTopK={}, vecTopK={}, finalTopK={}, rrfK={}",
+                    hybridProps.getKeywordTopK(), hybridProps.getVectorTopK(),
+                    hybridProps.getFinalTopK(), hybridProps.getRrfK());
         }
     }
 
@@ -198,36 +223,90 @@ public class InMemoryRagRetriever implements RagRetriever {
             throw new IllegalArgumentException("topK 必须 > 0, 实际: " + topK);
         }
         return switch (retrievalMode) {
-            case VECTOR -> vectorRetrieve(question, topK);
+            case VECTOR  -> vectorRetrieve(question, topK);
             case KEYWORD -> keywordRetrieve(question, topK);
+            case HYBRID  -> hybridRetrieve(question, topK);
         };
     }
 
+    // ==================== 关键词检索 ====================
+
     /**
-     * 关键词检索(与 V2 行为完全一致).
+     * 关键词检索:返回 {@link RagSearchResult} 列表(供 hybrid 融合使用).
      */
-    private List<RagDocument> keywordRetrieve(String question, int topK) {
+    private List<RagSearchResult> keywordSearch(String question, int topK) {
         Set<String> qTokens = tokenize(question);
         if (qTokens.isEmpty()) return List.of();
 
-        List<RagDocument> scored = new ArrayList<>();
+        List<RagSearchResult> scored = new ArrayList<>();
         for (RetrievalEntry entry : entries) {
             int hits = countIntersection(qTokens, entry.tokens);
             if (hits == 0) continue;
             double score = (double) hits / Math.max(Math.max(qTokens.size(), entry.tokens.size()), 1);
-            scored.add(new RagDocument(
-                    entry.id, entry.title, entry.content, entry.source,
-                    score, List.of(), entry.metadata));
+            scored.add(new RagSearchResult(
+                    entry.id, extractDocumentId(entry.id), entry.title,
+                    entry.content, entry.source, score, 0,
+                    RetrievalType.KEYWORD, entry.metadata));
         }
-        scored.sort(Comparator.comparingDouble(RagDocument::score).reversed());
+        scored.sort(Comparator.comparingDouble(RagSearchResult::score).reversed());
         if (scored.size() > topK) scored = scored.subList(0, topK);
-        return List.copyOf(scored);
+
+        // 设 rank(1-based)
+        List<RagSearchResult> ranked = new ArrayList<>();
+        for (int i = 0; i < scored.size(); i++) {
+            RagSearchResult r = scored.get(i);
+            ranked.add(new RagSearchResult(
+                    r.id(), r.documentId(), r.title(), r.content(), r.source(),
+                    r.score(), i + 1, RetrievalType.KEYWORD, r.metadataView()));
+        }
+        return List.copyOf(ranked);
     }
 
     /**
-     * 向量检索:embed → vectorStore.search → 过滤 score ≤ 0 → RagDocument.
-     *
-     * <p>score &le; 0 表示不相关文档,直接过滤不返回给 RAG context。
+     * 关键词检索 → RagDocument(与 V2 行为完全一致).
+     */
+    private List<RagDocument> keywordRetrieve(String question, int topK) {
+        List<RagSearchResult> results = keywordSearch(question, topK);
+        return results.stream()
+                .map(r -> {
+                    Map<String, Object> meta = new java.util.LinkedHashMap<>(r.metadataView());
+                    meta.put("retrievalType", "KEYWORD");
+                    return new RagDocument(r.id(), r.title(), r.content(), r.source(),
+                            r.score(), List.of(), meta);
+                })
+                .toList();
+    }
+
+    // ==================== 向量检索 ====================
+
+    /**
+     * 向量检索:返回 {@link RagSearchResult} 列表(供 hybrid 融合使用).
+     */
+    private List<RagSearchResult> vectorSearch(String question, int topK) {
+        if (embeddingClient == null || vectorStore == null) {
+            return List.of();
+        }
+        EmbeddingVector queryVec = embeddingClient.embed(question);
+        List<VectorSearchResult> results = vectorStore.search(queryVec, topK);
+
+        List<RagSearchResult> out = new ArrayList<>();
+        for (int i = 0; i < results.size(); i++) {
+            VectorSearchResult r = results.get(i);
+            if (r.score() <= 0.0) continue;
+            VectorDocument doc = r.document();
+            if (doc == null) continue;
+            out.add(new RagSearchResult(
+                    doc.id(), doc.documentId(),
+                    doc.source(), // title ← source
+                    doc.content(), doc.source(),
+                    r.score(), i + 1, RetrievalType.VECTOR,
+                    doc.metadataView()));
+        }
+        return List.copyOf(out);
+    }
+
+    /**
+     * 向量检索 → RagDocument(与 V3 行为完全一致).
      */
     private List<RagDocument> vectorRetrieve(String question, int topK) {
         if (embeddingClient == null || vectorStore == null) {
@@ -238,20 +317,44 @@ public class InMemoryRagRetriever implements RagRetriever {
         List<VectorSearchResult> results = vectorStore.search(queryVec, topK);
         return results.stream()
                 .filter(r -> r.score() > 0.0)
-                .map(this::toRagDocument)
+                .map(r -> {
+                    VectorDocument doc = r.document();
+                    if (doc == null) return null;
+                    double score = Math.min(1.0, Math.max(0.0, r.score()));
+                    Map<String, Object> meta = new java.util.LinkedHashMap<>(doc.metadataView());
+                    meta.put("retrievalType", "VECTOR");
+                    return new RagDocument(doc.id(), doc.source(), doc.content(),
+                            doc.source(), score, List.of(), meta);
+                })
                 .filter(Objects::nonNull)
                 .toList();
     }
 
+    // ==================== Hybrid 检索(V7 新增) ====================
+
     /**
-     * {@link VectorSearchResult} → {@link RagDocument};score 钳位到 [0,1].
+     * Hybrid 检索:关键词 + 向量双路 → RRF 融合.
+     *
+     * @param question 用户问题
+     * @param topK     入参 topK,> 0 时覆盖配置的 finalTopK
      */
-    private RagDocument toRagDocument(VectorSearchResult result) {
-        if (result == null || result.document() == null) return null;
-        VectorDocument doc = result.document();
-        double score = Math.min(1.0, Math.max(0.0, result.score()));
-        return new RagDocument(doc.id(), doc.source(), doc.content(),
-                doc.source(), score, List.of(), doc.metadataView());
+    private List<RagDocument> hybridRetrieve(String question, int topK) {
+        if (hybridProps == null || rrfFusion == null) {
+            log.warn("HYBRID 模式但 hybridProps 为 null,降级到关键词");
+            return keywordRetrieve(question, topK);
+        }
+
+        int finalTopK = topK > 0 ? topK : hybridProps.getFinalTopK();
+
+        // 双路检索
+        List<RagSearchResult> kwResults = keywordSearch(question, hybridProps.getKeywordTopK());
+        List<RagSearchResult> vecResults = vectorSearch(question, hybridProps.getVectorTopK());
+
+        log.debug("hybridRetrieve: kw={}, vec={}, finalTopK={}",
+                kwResults.size(), vecResults.size(), finalTopK);
+
+        // RRF 融合
+        return rrfFusion.fuse(kwResults, vecResults, finalTopK);
     }
 
     // ==================== 内部结构 ====================
@@ -301,14 +404,19 @@ public class InMemoryRagRetriever implements RagRetriever {
         return n;
     }
 
+    /** 从 chunk id 提取 documentId(与 VectorDocument.extractDocumentId 逻辑一致). */
+    private static String extractDocumentId(String id) {
+        if (id == null) return null;
+        int idx = id.lastIndexOf("-chunk-");
+        return idx > 0 ? id.substring(0, idx) : id;
+    }
+
     // ==================== V1 兼容(保留但不建议使用) ====================
 
     /**
-     * V1 内置种子文档列表 —— 用于演示与打通链路(V1 RAG).
+     * V1 内置种子文档列表.
      *
-     * @deprecated V2 改为从 knowledge-base 目录加载,本方法仅供老测试过渡使用。
-     *     <p>新代码应通过 {@link MarkdownKnowledgeDocumentLoader} + {@link SimpleTextChunker}
-     *     加载真实文档。</p>
+     * @deprecated V2 改为从 knowledge-base 目录加载.
      */
     @Deprecated
     public static List<RagDocument> defaultDocuments() {

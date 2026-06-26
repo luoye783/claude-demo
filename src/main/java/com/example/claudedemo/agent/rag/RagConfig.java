@@ -2,6 +2,7 @@ package com.example.claudedemo.agent.rag;
 
 import com.example.claudedemo.agent.rag.chunker.SimpleTextChunker;
 import com.example.claudedemo.agent.rag.embedding.EmbeddingClient;
+import com.example.claudedemo.agent.rag.hybrid.HybridProperties;
 import com.example.claudedemo.agent.rag.index.IndexProperties;
 import com.example.claudedemo.agent.rag.index.KnowledgeIndexService;
 import com.example.claudedemo.agent.rag.loader.MarkdownKnowledgeDocumentLoader;
@@ -32,7 +33,7 @@ import org.springframework.core.io.support.ResourcePatternResolver;
  * @since 0.0.1
  */
 @Configuration
-@EnableConfigurationProperties({RagProperties.class, IndexProperties.class})
+@EnableConfigurationProperties({RagProperties.class, IndexProperties.class, HybridProperties.class})
 public class RagConfig {
 
     @Bean
@@ -63,8 +64,10 @@ public class RagConfig {
                                               SimpleTextChunker chunker,
                                               RagProperties props,
                                               EmbeddingClient embeddingClient,
-                                              VectorStore vectorStore) {
-        return new InMemoryRagRetriever(loader, chunker, props, embeddingClient, vectorStore);
+                                              VectorStore vectorStore,
+                                              HybridProperties hybridProps) {
+        return new InMemoryRagRetriever(loader, chunker, props,
+                embeddingClient, vectorStore, hybridProps);
     }
 
     /**
