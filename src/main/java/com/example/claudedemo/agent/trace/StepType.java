@@ -45,5 +45,24 @@ public enum StepType {
      * content 含 query、topK、命中数、耗时。注意:当 {@code RagRetriever} 未装配时
      * <b>不记录</b>此步骤,保持老 trace 形状兼容。
      */
-    RAG_RETRIEVE
+    RAG_RETRIEVE,
+
+    /**
+     * Planner 生成执行计划(Agent Runtime V3).
+     *
+     * <p>由 {@link com.example.claudedemo.agent.mcp.Nl2SqlMcpAgent} 在
+     * tool calling 循环前调用 {@code AgentPlanner.plan()} 后记录;
+     * content 含 planId、步骤数、步骤描述摘要。
+     */
+    PLAN_CREATED,
+
+    /**
+     * Planner 步骤开始执行(Agent Runtime V3,预留).
+     */
+    PLAN_STEP_STARTED,
+
+    /**
+     * Planner 步骤执行完成(Agent Runtime V3,预留).
+     */
+    PLAN_STEP_FINISHED
 }

@@ -7,6 +7,9 @@ import com.example.claudedemo.agent.memory.ConversationMemory;
 import com.example.claudedemo.agent.memory.ConversationStore;
 import com.example.claudedemo.agent.memory.ConversationTurn;
 import com.example.claudedemo.agent.memory.SummaryMemory;
+import com.example.claudedemo.agent.planner.AgentPlan;
+import com.example.claudedemo.agent.planner.AgentPlanner;
+import com.example.claudedemo.agent.planner.PlannerProperties;
 import com.example.claudedemo.agent.rag.RagDocument;
 import com.example.claudedemo.agent.rag.RagProperties;
 import com.example.claudedemo.agent.rag.RagRetriever;
@@ -123,12 +126,16 @@ public class Nl2SqlMcpAgent {
     private final RagRetriever ragRetriever;
     /** RAG 配置(V2 第六阶段,可空;默认全用 RagProperties 默认值). */
     private final RagProperties ragProps;
+    /** Planner(V3 新增,可空;null 时跳过计划生成). */
+    private final AgentPlanner planner;
+    /** Planner 配置(V3 新增,始终非 null). */
+    private final PlannerProperties plannerProps;
 
     /**
      * V1 兼容构造器:不注入 memoryStore,无记忆模式.
      */
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient) {
-        this(llmClient, mcpToolClient, (ConversationStore) null);
+        this(llmClient, mcpToolClient, null, null, null, null, null);
     }
 
     /**
@@ -136,7 +143,7 @@ public class Nl2SqlMcpAgent {
      */
     @Autowired
     public Nl2SqlMcpAgent(LlmClient llmClient, McpToolClient mcpToolClient, ConversationStore memoryStore) {
-        this(llmClient, mcpToolClient, memoryStore, null, null);
+        this(llmClient, mcpToolClient, memoryStore, null, null, null, null);
     }
 
     /**
@@ -147,11 +154,34 @@ public class Nl2SqlMcpAgent {
                           ConversationStore memoryStore,
                           RagRetriever ragRetriever,
                           RagProperties ragProps) {
+        this(llmClient, mcpToolClient, memoryStore, ragRetriever, ragProps, null, null);
+    }
+
+    /**
+     * V3 完整构造器:含 Planner.
+     *
+     * @param llmClient     LLM 客户端
+     * @param mcpToolClient MCP 工具客户端
+     * @param memoryStore   会话记忆存储(可空)
+     * @param ragRetriever  RAG 检索器(可空)
+     * @param ragProps      RAG 配置(可空,默认用 RagProperties 默认值)
+     * @param planner       Planner(可空,null 时跳过计划生成)
+     * @param plannerProps  Planner 配置(可空,默认用关闭状态)
+     */
+    public Nl2SqlMcpAgent(LlmClient llmClient,
+                          McpToolClient mcpToolClient,
+                          ConversationStore memoryStore,
+                          RagRetriever ragRetriever,
+                          RagProperties ragProps,
+                          AgentPlanner planner,
+                          PlannerProperties plannerProps) {
         this.llmClient = llmClient;
         this.mcpToolClient = mcpToolClient;
         this.memoryStore = memoryStore;
         this.ragRetriever = ragRetriever;
         this.ragProps = (ragProps == null) ? new RagProperties() : ragProps;
+        this.planner = planner;
+        this.plannerProps = (plannerProps != null) ? plannerProps : new PlannerProperties();
         this.toolDefs = mcpToolClient.listTools();
         if (this.toolDefs.isEmpty()) {
             log.warn("Nl2SqlMcpAgent 构造期未从 MCP Server 拉取到任何工具,LLM 将无法调用工具");
@@ -163,6 +193,10 @@ public class Nl2SqlMcpAgent {
         if (this.ragRetriever != null) {
             log.info("Nl2SqlMcpAgent 已启用 RAG:topK={}, minScore={}, maxContentChars={}",
                     this.ragProps.getTopK(), this.ragProps.getMinScore(), this.ragProps.getMaxContentChars());
+        }
+        if (this.planner != null) {
+            log.info("Nl2SqlMcpAgent 已启用 Planner:enabled={}, type={}",
+                    this.plannerProps.isEnabled(), this.plannerProps.getType());
         }
     }
 
@@ -200,6 +234,7 @@ public class Nl2SqlMcpAgent {
      */
     public ToolCallingResult answer(String question) {
         AgentSession session = openSession(null, question);
+        generatePlan(session, question);
         List<ChatMessage> messages = buildInitialMessages(session, question);
         ToolLoopResult loop = executeOnSession(session, question, messages);
         return finalizeSession(session, question, loop);
@@ -228,9 +263,25 @@ public class Nl2SqlMcpAgent {
             throw new IllegalArgumentException("sessionId must not be blank");
         }
         AgentSession session = openSession(sessionId, question);
+        generatePlan(session, question);
         List<ChatMessage> messages = buildInitialMessages(session, question);
         ToolLoopResult loop = executeOnSession(session, question, messages);
         return finalizeSession(session, question, loop);
+    }
+
+    // ==================== Planner(V3 新增) ====================
+
+    /**
+     * 调用 Planner 生成执行计划,记录 trace + session metadata.
+     *
+     * <p>仅在 planner 非 null 且 enabled 时生效;不改变后续执行逻辑。
+     */
+    private void generatePlan(AgentSession session, String question) {
+        if (planner != null && plannerProps.isEnabled()) {
+            AgentPlan plan = planner.plan(session, question);
+            session.trace().addStep(StepType.PLAN_CREATED, plan.summary());
+            session.put("agentPlan", plan);
+        }
     }
 
     // ==================== Session 三段式 ====================
