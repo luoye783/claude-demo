@@ -306,6 +306,29 @@ public class Nl2SqlMcpAgent {
         }
     }
 
+    /**
+     * V5: 真实工具调用前,将 plan 中对应 CALL_TOOL step 标记 RUNNING.
+     */
+    private void markToolStepStarted(AgentSession session, String toolName, String toolCallId) {
+        if (planner == null || !plannerProps.isEnabled()) return;
+        AgentPlan plan = (AgentPlan) session.get("agentPlan");
+        if (plan == null) return;
+        plan = planExecutor.markToolStepStarted(session, plan, toolName, toolCallId);
+        session.put("agentPlan", plan);
+    }
+
+    /**
+     * V5: 真实工具调用后,将 plan 中对应 CALL_TOOL step 标记 SUCCESS / FAILED.
+     */
+    private void markToolStepFinished(AgentSession session, String toolName,
+                                       String toolCallId, boolean success, String note) {
+        if (planner == null || !plannerProps.isEnabled()) return;
+        AgentPlan plan = (AgentPlan) session.get("agentPlan");
+        if (plan == null) return;
+        plan = planExecutor.markToolStepFinished(session, plan, toolName, toolCallId, success, note);
+        session.put("agentPlan", plan);
+    }
+
     // ==================== Session 三段式 ====================
 
     /**
@@ -486,12 +509,23 @@ public class Nl2SqlMcpAgent {
             }
 
             for (ToolCall call : calls) {
+                String toolName = call.function().name();
+                String toolCallId = call.id();
+
+                // V5: plan step 与真实 tool call 关联
+                markToolStepStarted(session, toolName, toolCallId);
+
                 String callLabel = describeCall(call);
                 trace.addStep(StepType.TOOL_CALL, callLabel);
 
                 long toolStart = System.currentTimeMillis();
                 String result = executeTool(call);
                 long toolDuration = System.currentTimeMillis() - toolStart;
+
+                // V5: 根据执行结果标记 plan step SUCCESS / FAILED
+                boolean success = result != null && !result.startsWith("Error:");
+                markToolStepFinished(session, toolName, toolCallId,
+                        success, success ? "tool executed successfully" : result);
 
                 messages.add(new ChatMessage("tool", result, null, call.id()));
                 toolCalls.add(ToolCallRecord.of(call, result));

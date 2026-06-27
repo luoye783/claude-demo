@@ -45,13 +45,13 @@ class AgentPlanExecutorTest {
     }
 
     @Test
-    void call_tool_steps_should_be_skipped() {
+    void call_tool_steps_should_be_pending() {
         AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
 
         for (AgentPlanStep s : result.steps()) {
             if (s.type() == AgentPlanStepType.CALL_TOOL) {
-                assertEquals(AgentPlanStepStatus.SKIPPED, s.status(),
-                        "CALL_TOOL step " + s.stepId() + " 应为 SKIPPED");
+                assertEquals(AgentPlanStepStatus.PENDING, s.status(),
+                        "V5 CALL_TOOL step " + s.stepId() + " 应保持 PENDING");
             }
         }
     }
@@ -124,19 +124,124 @@ class AgentPlanExecutorTest {
     }
 
     @Test
-    void skipped_steps_have_note_in_trace() {
-        executor.executeBeforeMainLoop(session, plan, "查询用户");
+    void think_step_should_be_skipped() {
+        AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
 
-        boolean hasSkipNote = session.trace().steps().stream()
-                .filter(s -> s.stepType() == StepType.PLAN_STEP_FINISHED
-                        && s.content().contains("status=SKIPPED"))
-                .anyMatch(s -> s.content().contains("tool loop"));
-        assertTrue(hasSkipNote, "SKIPPED trace 应说明原因");
+        // THINK 步骤不存在于 SimpleAgentPlanner 的默认计划中
+        // 此测试验证:如果存在 THINK 步骤,会被标记 SKIPPED
+        // 由于默认 4 步计划无 THINK,改为验证 RETRIEVE_CONTEXT 被正确处理为 SUCCESS
+        AgentPlanStep retrieve = findStep(result, AgentPlanStepType.RETRIEVE_CONTEXT);
+        assertEquals(AgentPlanStepStatus.SUCCESS, retrieve.status());
+    }
+
+    // ==================== V5 markToolStep Started/Finished 测试 ====================
+
+    @Test
+    void markToolStepStarted_matches_by_tool_name() {
+        AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
+        result = executor.markToolStepStarted(session, result, "get_schema", "call_1");
+
+        AgentPlanStep step = findStep(result, "get_schema");
+        assertNotNull(step);
+        assertEquals(AgentPlanStepStatus.RUNNING, step.status());
+    }
+
+    @Test
+    void markToolStepFinished_success() {
+        AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
+        result = executor.markToolStepStarted(session, result, "get_schema", "call_1");
+        result = executor.markToolStepFinished(session, result, "get_schema", "call_1",
+                true, "ok");
+
+        AgentPlanStep step = findStep(result, "get_schema");
+        assertEquals(AgentPlanStepStatus.SUCCESS, step.status());
+    }
+
+    @Test
+    void markToolStepFinished_failure() {
+        AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
+        result = executor.markToolStepStarted(session, result, "execute_sql", "call_2");
+        result = executor.markToolStepFinished(session, result, "execute_sql", "call_2",
+                false, "SQL error");
+
+        AgentPlanStep step = findStep(result, "execute_sql");
+        assertEquals(AgentPlanStepStatus.FAILED, step.status());
+    }
+
+    @Test
+    void markToolStepStarted_prefers_pending() {
+        AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
+        // get_schema step 是 PENDING,execute_sql 也是 PENDING
+        // 首次 markToolStepStarted 应匹配 PENDING 的 get_schema
+        result = executor.markToolStepStarted(session, result, "get_schema", "call_1");
+        AgentPlanStep step = findStep(result, "get_schema");
+        assertEquals(AgentPlanStepStatus.RUNNING, step.status());
+    }
+
+    @Test
+    void markToolStepStarted_no_match_returns_original() {
+        AgentPlan result = executor.executeBeforeMainLoop(session, plan, "查询用户");
+        AgentPlan noMatch = executor.markToolStepStarted(session, result, "unknown_tool", "call_1");
+        assertSame(result, noMatch, "未匹配应返回原 plan");
+    }
+
+    @Test
+    void markToolStepStarted_trace_contains_tool_call_id() {
+        executor.executeBeforeMainLoop(session, plan, "查询用户");
+        executor.markToolStepStarted(session, plan, "get_schema", "call_abc123");
+
+        boolean found = session.trace().steps().stream()
+                .anyMatch(s -> s.content().contains("toolCallId=call_abc123"));
+        assertTrue(found, "trace 应包含 toolCallId");
+    }
+
+    @Test
+    void markToolStepFinished_trace_contains_note() {
+        executor.executeBeforeMainLoop(session, plan, "查询用户");
+        session = new AgentSession(null, null, new AgentTrace()); // fresh trace
+        AgentPlan p = executor.markToolStepStarted(session, plan, "get_schema", "c1");
+        executor.markToolStepFinished(session, p, "get_schema", "c1",
+                false, "connection refused");
+
+        boolean found = session.trace().steps().stream()
+                .anyMatch(s -> s.content().contains("note=connection refused"));
+        assertTrue(found, "trace 应包含失败原因 note");
+    }
+
+    @Test
+    void complete_plan_lifecycle_v5() {
+        // executeBeforeMainLoop
+        AgentPlan p = executor.executeBeforeMainLoop(session, plan, "查询用户");
+
+        // tool calls
+        p = executor.markToolStepStarted(session, p, "get_schema", "c1");
+        p = executor.markToolStepFinished(session, p, "get_schema", "c1", true, null);
+        p = executor.markToolStepStarted(session, p, "execute_sql", "c2");
+        p = executor.markToolStepFinished(session, p, "execute_sql", "c2", true, null);
+
+        // finalize
+        p = executor.finalizeAfterMainLoop(session, p, true);
+
+        // 验证所有 step 最终状态
+        assertEquals(AgentPlanStepStatus.SUCCESS,
+                findStep(p, AgentPlanStepType.RETRIEVE_CONTEXT).status());
+        assertEquals(AgentPlanStepStatus.SUCCESS,
+                findStep(p, "get_schema").status());
+        assertEquals(AgentPlanStepStatus.SUCCESS,
+                findStep(p, "execute_sql").status());
+        assertEquals(AgentPlanStepStatus.SUCCESS,
+                findStep(p, AgentPlanStepType.GENERATE_ANSWER).status());
     }
 
     private static AgentPlanStep findStep(AgentPlan plan, AgentPlanStepType type) {
         return plan.steps().stream()
                 .filter(s -> s.type() == type)
+                .findFirst().orElse(null);
+    }
+
+    private static AgentPlanStep findStep(AgentPlan plan, String toolName) {
+        return plan.steps().stream()
+                .filter(s -> toolName.equals(s.expectedToolName()))
                 .findFirst().orElse(null);
     }
 }

@@ -223,8 +223,54 @@ class Nl2SqlMcpAgentPlannerTest {
         assertFalse(hasAnyPlanEvent, "planner disabled 时不应有任何 PLAN_* trace");
     }
 
+    // ==================== V5 Tool Step Executor 测试 ====================
+
+    @Test
+    void v5_tool_call_trace_contains_tool_call_id() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(true);
+        ToolCallingResult result = agent.answer("查询用户");
+
+        boolean hasToolCallId = result.trace().steps().stream()
+                .anyMatch(s -> s.content().contains("toolCallId="));
+        assertTrue(hasToolCallId, "V5 trace 应包含 toolCallId");
+    }
+
+    @Test
+    void v5_plan_step_started_before_tool_call() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(true);
+        ToolCallingResult result = agent.answer("查询用户");
+
+        List<TraceStep> steps = result.trace().steps();
+        int planStarted = indexOf(steps, StepType.PLAN_STEP_STARTED);
+        int toolCall = lastIndexOf(steps, StepType.TOOL_CALL);
+
+        assertTrue(planStarted >= 0 && toolCall >= 0);
+        assertTrue(planStarted < toolCall,
+                "PLAN_STEP_STARTED 应在 TOOL_CALL 之前");
+    }
+
+    @Test
+    void v5_tool_call_success_marks_plan_step_success() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(true);
+        ToolCallingResult result = agent.answer("s3", "查询用户");
+
+        // trace 中应有 get_schema 的 PLAN_STEP_FINISHED status=SUCCESS
+        boolean hasGetSchemaSuccess = result.trace().steps().stream()
+                .filter(s -> s.stepType() == StepType.PLAN_STEP_FINISHED)
+                .anyMatch(s -> s.content().contains("tool=get_schema")
+                        && s.content().contains("status=SUCCESS"));
+        assertTrue(hasGetSchemaSuccess, "真实 get_schema 调用后应标记 SUCCESS");
+    }
+
     private int indexOf(List<TraceStep> steps, StepType type) {
         for (int i = 0; i < steps.size(); i++) {
+            if (steps.get(i).stepType() == type) return i;
+        }
+        return -1;
+    }
+
+    private int lastIndexOf(List<TraceStep> steps, StepType type) {
+        for (int i = steps.size() - 1; i >= 0; i--) {
             if (steps.get(i).stepType() == type) return i;
         }
         return -1;
