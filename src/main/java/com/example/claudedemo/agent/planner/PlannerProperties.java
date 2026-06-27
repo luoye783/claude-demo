@@ -18,6 +18,9 @@ public class PlannerProperties {
     /** Planner 类型(simple). */
     private String type = "simple";
 
+    /** 是否启用偏差检测(默认 true,仅在 planner 启用时生效). */
+    private boolean deviationDetectionEnabled = true;
+
     public boolean isEnabled() {
         return enabled;
     }
@@ -32,5 +35,13 @@ public class PlannerProperties {
 
     public void setType(String type) {
         this.type = type;
+    }
+
+    public boolean isDeviationDetectionEnabled() {
+        return deviationDetectionEnabled;
+    }
+
+    public void setDeviationDetectionEnabled(boolean deviationDetectionEnabled) {
+        this.deviationDetectionEnabled = deviationDetectionEnabled;
     }
 }

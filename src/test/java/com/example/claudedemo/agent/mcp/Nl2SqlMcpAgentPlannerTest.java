@@ -50,16 +50,33 @@ class Nl2SqlMcpAgentPlannerTest {
     }
 
     private Nl2SqlMcpAgent agentWithPlanner(boolean enabled) {
+        return agentWithPlanner(enabled, false);
+    }
+
+    /** @param callBothTools 是否让 LLM 依次调用 get_schema 和 execute_sql */
+    private Nl2SqlMcpAgent agentWithPlanner(boolean enabled, boolean callBothTools) {
         LlmClient llmClient = mock(LlmClient.class);
         McpToolClient mcpToolClient = mock(McpToolClient.class);
         when(mcpToolClient.listTools()).thenReturn(FAKE_TOOL_DEFS);
         when(mcpToolClient.callTool(eq("get_schema"), anyString())).thenReturn("表 USERS(id, name)");
         when(mcpToolClient.callTool(eq("execute_sql"), anyString())).thenReturn("{\"rows\":[1]}");
-        when(llmClient.chatWithTools(anyList(), anyList()))
-                .thenReturn(new LlmResponse(null, "tool_calls", List.of(
-                        toolCall("c1", "get_schema", "{}")
-                )))
-                .thenReturn(new LlmResponse("查询完成", "stop", null));
+
+        if (callBothTools) {
+            when(llmClient.chatWithTools(anyList(), anyList()))
+                    .thenReturn(new LlmResponse(null, "tool_calls", List.of(
+                            toolCall("c1", "get_schema", "{}")
+                    )))
+                    .thenReturn(new LlmResponse(null, "tool_calls", List.of(
+                            toolCall("c2", "execute_sql", "{\"sql\":\"select 1\"}")
+                    )))
+                    .thenReturn(new LlmResponse("查询完成", "stop", null));
+        } else {
+            when(llmClient.chatWithTools(anyList(), anyList()))
+                    .thenReturn(new LlmResponse(null, "tool_calls", List.of(
+                            toolCall("c1", "get_schema", "{}")
+                    )))
+                    .thenReturn(new LlmResponse("查询完成", "stop", null));
+        }
 
         PlannerProperties props = new PlannerProperties();
         props.setEnabled(enabled);
@@ -274,5 +291,40 @@ class Nl2SqlMcpAgentPlannerTest {
             if (steps.get(i).stepType() == type) return i;
         }
         return -1;
+    }
+
+    // ==================== V6 Deviation Detection 测试 ====================
+
+    @Test
+    void v6_perfect_execution_no_deviation_trace() {
+        // LLM 依次调用了 get_schema 和 execute_sql,都成功 → 无偏差
+        Nl2SqlMcpAgent agent = agentWithPlanner(true, true);
+        ToolCallingResult result = agent.answer("s4", "查询用户");
+
+        boolean hasDeviation = result.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.PLAN_DEVIATION_DETECTED);
+        assertFalse(hasDeviation,
+                "全部工具调用成功时不应有 PLAN_DEVIATION_DETECTED trace");
+    }
+
+    @Test
+    void v6_missing_tool_generates_deviation_trace() {
+        // LLM 只调用了 get_schema,execute_sql 没调 → MISSING_TOOL_CALL
+        Nl2SqlMcpAgent agent = agentWithPlanner(true, false);
+        ToolCallingResult result = agent.answer("s5", "查询用户");
+
+        boolean hasDeviation = result.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.PLAN_DEVIATION_DETECTED);
+        assertTrue(hasDeviation, "计划内工具未调用时应检测到偏差");
+    }
+
+    @Test
+    void v6_planner_disabled_no_deviation() {
+        Nl2SqlMcpAgent agent = agentWithPlanner(false);
+        ToolCallingResult result = agent.answer("查询用户");
+
+        boolean hasDeviation = result.trace().steps().stream()
+                .anyMatch(s -> s.stepType() == StepType.PLAN_DEVIATION_DETECTED);
+        assertFalse(hasDeviation, "planner disabled 时不应有偏差检测");
     }
 }

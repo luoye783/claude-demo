@@ -64,5 +64,15 @@ public enum StepType {
     /**
      * Planner 步骤执行完成(Agent Runtime V3,预留).
      */
-    PLAN_STEP_FINISHED
+    PLAN_STEP_FINISHED,
+
+    /**
+     * 计划偏差检测完成(Agent Runtime V6).
+     *
+     * <p>由 {@link com.example.claudedemo.agent.mcp.Nl2SqlMcpAgent} 在
+     * plan finalize 后调用 {@code PlanDeviationDetector.detect()} 后记录;
+     * content 含 planId、deviationCount、errors、warns。
+     * 无偏差时不记录此步骤。
+     */
+    PLAN_DEVIATION_DETECTED
 }

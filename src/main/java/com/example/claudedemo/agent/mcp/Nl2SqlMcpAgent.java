@@ -11,6 +11,11 @@ import com.example.claudedemo.agent.planner.AgentPlan;
 import com.example.claudedemo.agent.planner.AgentPlanExecutor;
 import com.example.claudedemo.agent.planner.AgentPlanner;
 import com.example.claudedemo.agent.planner.PlannerProperties;
+import com.example.claudedemo.agent.planner.deviation.PlanDeviation;
+import com.example.claudedemo.agent.planner.deviation.PlanDeviationDetector;
+import com.example.claudedemo.agent.planner.deviation.PlanDeviationSeverity;
+import com.example.claudedemo.agent.planner.deviation.SimplePlanDeviationDetector;
+import com.example.claudedemo.agent.planner.deviation.ToolExecutionRecord;
 import com.example.claudedemo.agent.rag.RagDocument;
 import com.example.claudedemo.agent.rag.RagProperties;
 import com.example.claudedemo.agent.rag.RagRetriever;
@@ -133,6 +138,8 @@ public class Nl2SqlMcpAgent {
     private final PlannerProperties plannerProps;
     /** PlanExecutor(V4 新增,始终非 null). */
     private final AgentPlanExecutor planExecutor;
+    /** 偏差检测器(V6 新增,始终非 null). */
+    private final PlanDeviationDetector deviationDetector;
 
     /**
      * V1 兼容构造器:不注入 memoryStore,无记忆模式.
@@ -186,6 +193,7 @@ public class Nl2SqlMcpAgent {
         this.planner = planner;
         this.plannerProps = (plannerProps != null) ? plannerProps : new PlannerProperties();
         this.planExecutor = new AgentPlanExecutor();
+        this.deviationDetector = new SimplePlanDeviationDetector();
         this.toolDefs = mcpToolClient.listTools();
         if (this.toolDefs.isEmpty()) {
             log.warn("Nl2SqlMcpAgent 构造期未从 MCP Server 拉取到任何工具,LLM 将无法调用工具");
@@ -302,6 +310,9 @@ public class Nl2SqlMcpAgent {
             if (plan != null) {
                 plan = planExecutor.finalizeAfterMainLoop(session, plan, success);
                 session.put("agentPlan", plan);
+
+                // V6: finalize 之后再检测偏差(基于最终 plan 状态)
+                detectDeviations(session, plan);
             }
         }
     }
@@ -327,6 +338,47 @@ public class Nl2SqlMcpAgent {
         if (plan == null) return;
         plan = planExecutor.markToolStepFinished(session, plan, toolName, toolCallId, success, note);
         session.put("agentPlan", plan);
+    }
+
+    // ==================== V6 偏差检测 ====================
+
+    /**
+     * 从 session metadata 获取或创建 ToolExecutionRecord 列表.
+     */
+    @SuppressWarnings("unchecked")
+    private List<ToolExecutionRecord> getOrCreateToolExecutions(AgentSession session) {
+        List<ToolExecutionRecord> list =
+                (List<ToolExecutionRecord>) session.get("toolExecutions");
+        if (list == null) {
+            list = new ArrayList<>();
+            session.put("toolExecutions", list);
+        }
+        return list;
+    }
+
+    /**
+     * 执行偏差检测并记录 trace.
+     */
+    private void detectDeviations(AgentSession session, AgentPlan plan) {
+        if (planner == null || !plannerProps.isEnabled()) return;
+        if (!plannerProps.isDeviationDetectionEnabled()) return;
+
+        List<ToolExecutionRecord> executions = getOrCreateToolExecutions(session);
+
+        List<PlanDeviation> deviations = deviationDetector.detect(plan, executions);
+        session.put("planDeviations", deviations);
+
+        if (!deviations.isEmpty()) {
+            long errors = deviations.stream()
+                    .filter(d -> d.severity() == PlanDeviationSeverity.ERROR).count();
+            long warns = deviations.stream()
+                    .filter(d -> d.severity() == PlanDeviationSeverity.WARN).count();
+            session.trace().addStep(StepType.PLAN_DEVIATION_DETECTED,
+                    "planId=" + plan.planId().substring(0, Math.min(8, plan.planId().length()))
+                            + " deviations=" + deviations.size()
+                            + " errors=" + errors
+                            + " warns=" + warns);
+        }
     }
 
     // ==================== Session 三段式 ====================
@@ -526,6 +578,13 @@ public class Nl2SqlMcpAgent {
                 boolean success = result != null && !result.startsWith("Error:");
                 markToolStepFinished(session, toolName, toolCallId,
                         success, success ? "tool executed successfully" : result);
+
+                // V6: 记录工具执行历史(偏差检测用)
+                getOrCreateToolExecutions(session).add(new ToolExecutionRecord(
+                        toolCallId, toolName,
+                        getOrCreateToolExecutions(session).size() + 1,
+                        success, toolStart, System.currentTimeMillis(),
+                        success ? null : result));
 
                 messages.add(new ChatMessage("tool", result, null, call.id()));
                 toolCalls.add(ToolCallRecord.of(call, result));
